@@ -1,0 +1,110 @@
+<?php
+// JSON API for the folder-batch workflow (batch.php).
+//   action=reset    -> clear leftover previews (start of a session)
+//   action=scan     -> scan ONE document (image or PDF); returns pages + cropped cells/words
+//   action=save     -> copy the verified crops of one document to output/ and drop its previews
+//   action=discard  -> drop a document's previews without saving (skip)
+// Uploaded documents are never stored; only verified crops end up in output/.
+
+header('Content-Type: application/json');
+
+$previewDir = __DIR__ . '/uploads/previews/';
+$outputDir  = __DIR__ . '/output/';
+foreach ([__DIR__ . '/uploads/', $previewDir, $outputDir] as $d) {
+    if (!is_dir($d)) mkdir($d, 0777, true);
+}
+
+require __DIR__ . '/engine.php';
+
+function out(array $data, int $code = 200): never
+{
+    http_response_code($code);
+    echo json_encode($data, JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+
+/** Safe file-name prefix for one document: "<id>_<relative path>_" */
+function docPrefix(string $id, string $rel): string
+{
+    $rel = preg_replace('/\.[^.\/\\\\]+$/', '', $rel);                 // drop extension
+    $rel = trim((string) preg_replace('/[^A-Za-z0-9]+/', '-', $rel), '-');
+    $rel = substr($rel, -70);
+    $id  = preg_replace('/[^0-9]/', '', $id);
+    return sprintf('d%s_%s_', str_pad($id === '' ? '0' : $id, 3, '0', STR_PAD_LEFT), $rel === '' ? 'doc' : $rel);
+}
+
+function validPrefix(string $prefix): bool
+{
+    return (bool) preg_match('/^d[0-9]{3,}_[A-Za-z0-9-]*_$/', $prefix);
+}
+
+function dropPreviews(string $previewDir, string $prefix): int
+{
+    $n = 0;
+    foreach (glob($previewDir . $prefix . '*') as $f) {
+        if (is_file($f) && @unlink($f)) $n++;
+    }
+    return $n;
+}
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    out(['ok' => false, 'error' => 'POST required'], 405);
+}
+$action = $_POST['action'] ?? '';
+
+if ($action === 'reset') {
+    foreach (glob($previewDir . '*') as $f) {
+        if (is_file($f)) @unlink($f);
+    }
+    out(['ok' => true]);
+}
+
+if ($action === 'scan') {
+    @set_time_limit(0);
+    if (!file_exists(KRAKEN_PYTHON)) {
+        out(['ok' => false, 'error' => 'Python executable not found'], 500);
+    }
+    if (!isset($_FILES['file'])) {
+        out(['ok' => false, 'error' => 'No file received (the server may limit upload size).'], 400);
+    }
+    $f = $_FILES['file'];
+    $padding = max(0, min(30, (int) ($_POST['padding'] ?? 4)));
+    $fmt = (string) ($_POST['output_format'] ?? 'png');
+    if (!in_array($fmt, ['png', 'jpeg', 'webp'], true)) $fmt = 'png';
+    $prefix = docPrefix((string) ($_POST['id'] ?? '0'), (string) ($_POST['rel'] ?? $f['name']));
+
+    dropPreviews($previewDir, $prefix);   // re-scan of the same document replaces its crops
+    $result = scanUploads(
+        [['name' => $f['name'], 'tmp' => $f['tmp_name'], 'error' => $f['error']]],
+        $prefix, $padding, $fmt, $previewDir
+    );
+    if (!$result['words']) {
+        out(['ok' => false, 'error' => $result['warnings'] ? implode(' ', $result['warnings']) : 'Nothing detected.']);
+    }
+    out(['ok' => true, 'prefix' => $prefix] + $result);
+}
+
+if ($action === 'save') {
+    $prefix = (string) ($_POST['prefix'] ?? '');
+    if (!validPrefix($prefix)) out(['ok' => false, 'error' => 'bad prefix'], 400);
+    $names = json_decode((string) ($_POST['filenames'] ?? '[]'), true);
+    $saved = [];
+    if (is_array($names)) {
+        foreach ($names as $n) {
+            $clean = basename((string) $n);
+            if (strncmp($clean, $prefix, strlen($prefix)) !== 0) continue;   // only this document's crops
+            $src = $previewDir . $clean;
+            if (is_file($src) && copy($src, $outputDir . $clean)) $saved[] = $clean;
+        }
+    }
+    dropPreviews($previewDir, $prefix);   // verified crops are saved; the rest is discarded
+    out(['ok' => true, 'count' => count($saved), 'files' => $saved]);
+}
+
+if ($action === 'discard') {
+    $prefix = (string) ($_POST['prefix'] ?? '');
+    if (!validPrefix($prefix)) out(['ok' => false, 'error' => 'bad prefix'], 400);
+    out(['ok' => true, 'dropped' => dropPreviews($previewDir, $prefix)]);
+}
+
+out(['ok' => false, 'error' => 'unknown action'], 400);

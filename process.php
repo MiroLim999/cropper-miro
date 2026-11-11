@@ -45,22 +45,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     exit;
 }
 
-// ── Kraken venv Python executable ───────────────────────────────────────────
-$pythonCandidates = [
-    'C:/xampp/htdocs/crms-laravel-12/ml/.venv-kraken/Scripts/python.exe',
-    'C:/laragon/www/crms-laravel-12-main/ml/.venv-kraken/Scripts/python.exe',
-    __DIR__ . '/.venv-kraken/Scripts/python.exe',
-    __DIR__ . '/.venv/Scripts/python.exe',
-];
-$krakenPy = 'python';
-foreach ($pythonCandidates as $candidate) {
-    if (file_exists($candidate)) {
-        $krakenPy = $candidate;
-        break;
-    }
-}
-define('KRAKEN_PYTHON', $krakenPy);
-define('KRAKEN_SCRIPT', __DIR__ . '/kraken_segment.py');
+require __DIR__ . '/engine.php';
 
 // Clear output directory and old previews on new upload scan
 foreach (glob($outputDir . '*') as $f) {
@@ -71,179 +56,49 @@ foreach (glob($previewDir . '*') as $f) {
 }
 
 // ── Redirect if not POST ─────────────────────────────────────────────────────
-if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !isset($_FILES['image'])) {
+if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !isset($_FILES['images'])) {
     header("Location: index.php");
     exit;
 }
 
 // ── Read options ─────────────────────────────────────────────────────────────
-$file = $_FILES['image'];
 $padding = max(0, min(30, (int) ($_POST['padding'] ?? 4)));
 $outputFormat = in_array($_POST['output_format'] ?? 'png', ['png', 'jpeg', 'webp'])
     ? $_POST['output_format'] : 'png';
 
-// ── Validate & save upload ───────────────────────────────────────────────────
-if ($file['error'] !== UPLOAD_ERR_OK) {
-    renderError("Upload failed (error code {$file['error']}).");
+// Normalise $_FILES['images'] (multiple pages) into a list of uploads
+$uploads = [];
+foreach ((array) $_FILES['images']['name'] as $i => $name) {
+    if ($_FILES['images']['error'][$i] === UPLOAD_ERR_NO_FILE) continue;
+    $uploads[] = [
+        'name'  => $name,
+        'tmp'   => $_FILES['images']['tmp_name'][$i],
+        'error' => $_FILES['images']['error'][$i],
+    ];
 }
-
-$ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-$allowedExt = ['jpg', 'jpeg', 'png', 'webp'];
-if (!in_array($ext, $allowedExt)) {
-    renderError("Unsupported file type. Please upload PNG, JPG, or WEBP.");
+if (!$uploads) {
+    renderError('No file was uploaded.');
 }
+// Keep pages in natural filename order (page1, page2, ... page10)
+usort($uploads, fn($a, $b) => strnatcasecmp($a['name'], $b['name']));
 
-$uploadFilename = 'original_' . time() . '.' . $ext;
-$uploadPath = $uploadDir . $uploadFilename;
-$originalWebPath = 'uploads/' . $uploadFilename;
-
-if (!move_uploaded_file($file['tmp_name'], $uploadPath)) {
-    renderError("Could not save uploaded file.");
-}
-
-// ── Run Kraken Word Segmentation Engine ──────────────────────────────────────
 if (!file_exists(KRAKEN_PYTHON)) {
-    renderError('Kraken Python executable not found at ' . KRAKEN_PYTHON);
+    renderError('Python executable not found at ' . KRAKEN_PYTHON);
 }
-if (!file_exists(KRAKEN_SCRIPT)) {
-    renderError('kraken_segment.py not found at ' . KRAKEN_SCRIPT);
-}
-
-$pyExe = escapeshellarg(KRAKEN_PYTHON);
-$pyScript = escapeshellarg(KRAKEN_SCRIPT);
-$pathEsc = escapeshellarg($uploadPath);
-$krakenCmd = "$pyExe $pyScript $pathEsc 2>&1";
-exec($krakenCmd, $krakenOut, $krakenCode);
-$krakenJson = trim(implode('', $krakenOut));
-
-if ($krakenCode !== 0) {
-    renderError('Kraken segmentation failed (exit ' . $krakenCode . '): ' . htmlspecialchars($krakenJson));
+foreach (glob($uploadDir . 'original_*') as $f) {
+    if (is_file($f)) unlink($f); // leftovers from older versions
 }
 
-// Extract JSON array payload even if warnings or notices were printed
-$jsonStart = strpos($krakenJson, '[');
-$jsonEnd = strrpos($krakenJson, ']');
-if ($jsonStart !== false && $jsonEnd !== false && $jsonEnd > $jsonStart) {
-    $krakenJsonClean = substr($krakenJson, $jsonStart, $jsonEnd - $jsonStart + 1);
-    $krakenBoxes = json_decode($krakenJsonClean, true);
-} else {
-    $krakenBoxes = json_decode($krakenJson, true);
+$result = scanUploads($uploads, '', $padding, $outputFormat, $previewDir);
+$pages = $result['pages'];
+$croppedWords = $result['words'];
+$tableMode = $result['tableMode'];
+$warnings = $result['warnings'];
+$wordCount = count($croppedWords);
+
+if ($wordCount === 0) {
+    renderError('Nothing could be cropped from the uploaded files.' . ($warnings ? ' ' . implode(' ', $warnings) : ''));
 }
-
-if (!is_array($krakenBoxes) || count($krakenBoxes) === 0) {
-    renderError('Kraken detected 0 words. Please try uploading a clearer image.');
-}
-
-// ── Load image into GD for Cropping ──────────────────────────────────────────
-$mime = mime_content_type($uploadPath);
-$sourceImage = match ($mime) {
-    'image/jpeg' => imagecreatefromjpeg($uploadPath),
-    'image/png' => imagecreatefrompng($uploadPath),
-    'image/webp' => imagecreatefromwebp($uploadPath),
-    default => null
-};
-
-if (!$sourceImage) {
-    renderError("Could not process image file into GD.");
-}
-
-$imgWidth = imagesx($sourceImage);
-$imgHeight = imagesy($sourceImage);
-
-// ── Crop helper (saves temporary preview crops) ──────────────────────────────
-function saveCrop(
-    \GdImage $src,
-    int $x,
-    int $y,
-    int $w,
-    int $h,
-    int $padding,
-    int $imgW,
-    int $imgH,
-    string $previewDir,
-    string $outputFormat,
-    int $idx
-): ?array {
-    $cx = max(0, $x - $padding);
-    $cy = max(0, $y - $padding);
-    $cw = min($imgW - $cx, $w + $padding * 2);
-    $ch = min($imgH - $cy, $h + $padding * 2);
-    if ($cw <= 0 || $ch <= 0)
-        return null;
-
-    $cropRect = ['x' => $cx, 'y' => $cy, 'width' => $cw, 'height' => $ch];
-    $croppedImg = imagecrop($src, $cropRect);
-    if ($croppedImg === false)
-        return null;
-
-    $filename = "word_{$idx}.{$outputFormat}";
-    $path = $previewDir . $filename;
-
-    switch ($outputFormat) {
-        case 'jpeg':
-            imagejpeg($croppedImg, $path, 95);
-            break;
-        case 'webp':
-            imagewebp($croppedImg, $path, 95);
-            break;
-        default:
-            imagepng($croppedImg, $path);
-            break;
-    }
-    imagedestroy($croppedImg);
-
-    return [
-        'file' => 'uploads/previews/' . $filename,
-        'filename' => $filename,
-        'w' => $cw,
-        'h' => $ch,
-        'orig_x' => $cx,
-        'orig_y' => $cy
-    ];
-}
-
-// ── Perform single-word crops ───────────────────────────────────────────────
-$croppedWords = [];
-$wordCount = 0;
-$skipped = 0;
-
-foreach ($krakenBoxes as $box) {
-    $crop = saveCrop(
-        $sourceImage,
-        (int) $box['x'],
-        (int) $box['y'],
-        (int) $box['w'],
-        (int) $box['h'],
-        $padding,
-        $imgWidth,
-        $imgHeight,
-        $previewDir,
-        $outputFormat,
-        $wordCount + 1
-    );
-
-    if ($crop === null) {
-        $skipped++;
-        continue;
-    }
-    $wordCount++;
-    $croppedWords[] = [
-        'id' => $wordCount,
-        'label' => 'Word #' . $wordCount,
-        'file' => $crop['file'],
-        'filename' => $crop['filename'],
-        'w' => $crop['w'],
-        'h' => $crop['h'],
-        'box' => [
-            'x' => (int) $box['x'],
-            'y' => (int) $box['y'],
-            'w' => (int) $box['w'],
-            'h' => (int) $box['h']
-        ]
-    ];
-}
-
-imagedestroy($sourceImage);
 
 // ── Error Renderer ──────────────────────────────────────────────────────────
 function renderError(string $msg): never
@@ -479,7 +334,7 @@ function renderError(string $msg): never
             flex: 1;
             overflow: auto;
             display: flex;
-            align-items: center;
+            align-items: flex-start;   /* never centre: a tall document would lose its top */
             justify-content: center;
             padding: 24px;
             background-image: 
@@ -920,6 +775,13 @@ function renderError(string $msg): never
         </div>
     </header>
 
+    <?php if ($warnings): ?>
+        <div style="background:#2a1d00;border-bottom:1px solid #6b4a00;color:#ffd78a;padding:10px 24px;font-size:.82rem;line-height:1.5;">
+            <strong><?= count($warnings) ?> file(s) skipped:</strong>
+            <?= htmlspecialchars(implode(' • ', $warnings)) ?>
+        </div>
+    <?php endif; ?>
+
     <!-- Side-by-Side Workspace -->
     <main class="workspace">
         
@@ -927,10 +789,14 @@ function renderError(string $msg): never
         <section class="image-pane">
             <div class="pane-header">
                 <div class="pane-title">
-                    <span>Original Picture</span>
-                    <span style="color:var(--text-dim); font-weight:400; font-size:.75rem;">(<?= $imgWidth ?> × <?= $imgHeight ?> px)</span>
+                    <span>Document</span>
+                    <span style="color:var(--text-dim); font-weight:400; font-size:.75rem;">(<?= count($pages) ?> page<?= count($pages) > 1 ? 's' : '' ?> • <?= $tableMode ? 'table cells' : 'words' ?>)</span>
                 </div>
                 <div class="pane-tools">
+                    <?php foreach ($pages as $pg): ?>
+                        <button type="button" class="tool-btn" style="width:auto;padding:0 10px;" title="Go to page <?= $pg['no'] ?>"
+                                onclick="document.getElementById('page-<?= $pg['no'] ?>').scrollIntoView({behavior:'smooth', block:'start'});">P<?= $pg['no'] ?></button>
+                    <?php endforeach; ?>
                     <button type="button" class="tool-btn" id="zoomOutBtn" title="Zoom Out">−</button>
                     <button type="button" class="tool-btn" id="zoomResetBtn" title="Reset Zoom">1:1</button>
                     <button type="button" class="tool-btn" id="zoomInBtn" title="Zoom In">+</button>
@@ -938,24 +804,30 @@ function renderError(string $msg): never
             </div>
 
             <div class="image-viewport" id="imageViewport">
-                <div class="image-canvas-wrap" id="canvasWrap">
-                    <img id="originalImg" src="<?= htmlspecialchars($originalWebPath) ?>" alt="Original Image">
-                    <div class="bbox-overlay" id="bboxOverlay">
-                        <?php foreach ($croppedWords as $w): 
-                            $bx = ($w['box']['x'] / $imgWidth) * 100;
-                            $by = ($w['box']['y'] / $imgHeight) * 100;
-                            $bw = ($w['box']['w'] / $imgWidth) * 100;
-                            $bh = ($w['box']['h'] / $imgHeight) * 100;
-                        ?>
-                            <div class="bbox selected" 
-                                 id="bbox-<?= $w['id'] ?>" 
-                                 data-id="<?= $w['id'] ?>"
-                                 style="left: <?= $bx ?>%; top: <?= $by ?>%; width: <?= $bw ?>%; height: <?= $bh ?>%;"
-                                 title="Word #<?= $w['id'] ?> (Click to toggle)">
-                                <span class="bbox-tag"><?= $w['id'] ?></span>
-                            </div>
-                        <?php endforeach; ?>
+                <div id="canvasWrap" style="display:flex; flex-direction:column; gap:24px; align-items:center; transform-origin: top center; transition: transform .2s ease; width:100%;">
+                <?php foreach ($pages as $pg): ?>
+                    <div class="image-canvas-wrap" id="page-<?= $pg['no'] ?>" style="width:100%; margin-top:22px; scroll-margin-top:30px;">
+                        <div style="position:absolute; top:-18px; left:0; font-size:.7rem; color:var(--text-muted);">Page <?= $pg['no'] ?> — <?= htmlspecialchars($pg['name']) ?> (<?= $pg['w'] ?> × <?= $pg['h'] ?> px)</div>
+                        <img src="<?= htmlspecialchars($pg['src']) ?>" alt="Page <?= $pg['no'] ?>">
+                        <div class="bbox-overlay">
+                            <?php foreach ($croppedWords as $w):
+                                if ($w['page'] !== $pg['no']) continue;
+                                $bx = ($w['box']['x'] / $pg['w']) * 100;
+                                $by = ($w['box']['y'] / $pg['h']) * 100;
+                                $bw = ($w['box']['w'] / $pg['w']) * 100;
+                                $bh = ($w['box']['h'] / $pg['h']) * 100;
+                            ?>
+                                <div class="bbox selected"
+                                     id="bbox-<?= $w['id'] ?>"
+                                     data-id="<?= $w['id'] ?>"
+                                     style="left: <?= $bx ?>%; top: <?= $by ?>%; width: <?= $bw ?>%; height: <?= $bh ?>%;"
+                                     title="<?= htmlspecialchars($w['label']) ?> (Click to toggle)">
+                                    <span class="bbox-tag"><?= $w['id'] ?></span>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
                     </div>
+                <?php endforeach; ?>
                 </div>
             </div>
         </section>
@@ -967,7 +839,7 @@ function renderError(string $msg): never
             <div class="action-bar">
                 <div class="selection-stat">
                     <span class="sel-badge" id="selectedBadge"><?= $wordCount ?></span>
-                    <span class="sel-text">of <?= $wordCount ?> words selected</span>
+                    <span class="sel-text">of <?= $wordCount ?> <?= $tableMode ? 'cells' : 'words' ?> selected</span>
                 </div>
                 <div class="action-buttons">
                     <button type="button" class="btn-action" id="selectAllBtn">Select All</button>
@@ -982,7 +854,7 @@ function renderError(string $msg): never
             <div class="search-bar">
                 <div class="search-input-wrap">
                     <span class="search-icon">🔍</span>
-                    <input type="text" id="searchInput" placeholder="Filter words by # (e.g. 3)...">
+                    <input type="text" id="searchInput" placeholder="Filter by # or label (e.g. P1 R3, C2)...">
                 </div>
                 <div class="meta-counts">
                     Format: <strong><?= strtoupper($outputFormat) ?></strong> • Padding: <strong><?= $padding ?>px</strong>
@@ -997,26 +869,27 @@ function renderError(string $msg): never
                              id="card-<?= $w['id'] ?>" 
                              data-id="<?= $w['id'] ?>"
                              data-file="<?= htmlspecialchars($w['file']) ?>"
-                             data-filename="<?= htmlspecialchars($w['filename']) ?>">
+                             data-filename="<?= htmlspecialchars($w['filename']) ?>"
+                             data-label="<?= htmlspecialchars($w['label']) ?>">
                             
                             <div class="card-top">
                                 <label class="chk-wrap" onclick="event.stopPropagation();">
                                     <input type="checkbox" class="word-chk" data-id="<?= $w['id'] ?>" checked>
                                     <span class="custom-chk"></span>
-                                    <span>#<?= $w['id'] ?></span>
+                                    <span><?= htmlspecialchars($w['label']) ?></span>
                                 </label>
                                 <span class="dim-badge"><?= $w['w'] ?>×<?= $w['h'] ?></span>
                             </div>
 
-                            <div class="crop-preview-wrap" onclick="openModal('<?= htmlspecialchars($w['file']) ?>', 'Word #<?= $w['id'] ?> (<?= $w['w'] ?>×<?= $w['h'] ?> px)')">
-                                <img src="<?= htmlspecialchars($w['file']) ?>" alt="Word #<?= $w['id'] ?>" loading="lazy">
+                            <div class="crop-preview-wrap" onclick="openModal('<?= htmlspecialchars($w['file']) ?>', '<?= htmlspecialchars($w['label']) ?> (<?= $w['w'] ?>×<?= $w['h'] ?> px)')">
+                                <img src="<?= htmlspecialchars($w['file']) ?>" alt="<?= htmlspecialchars($w['label']) ?>" loading="lazy">
                             </div>
 
                             <div class="card-bottom">
                                 <button type="button" class="btn-single-dl" onclick="saveSingleWord(event, '<?= htmlspecialchars($w['filename']) ?>');">
                                     💾 Save
                                 </button>
-                                <button type="button" class="btn-zoom" title="Inspect" onclick="openModal('<?= htmlspecialchars($w['file']) ?>', 'Word #<?= $w['id'] ?> (<?= $w['w'] ?>×<?= $w['h'] ?> px)')">
+                                <button type="button" class="btn-zoom" title="Inspect" onclick="openModal('<?= htmlspecialchars($w['file']) ?>', '<?= htmlspecialchars($w['label']) ?> (<?= $w['w'] ?>×<?= $w['h'] ?> px)')">
                                     🔍 Zoom
                                 </button>
                             </div>
@@ -1173,7 +1046,8 @@ function renderError(string $msg): never
             const q = e.target.value.trim().toLowerCase();
             document.querySelectorAll('.word-card').forEach(card => {
                 const id = card.dataset.id;
-                const match = !q || id.includes(q) || ('word #' + id).includes(q);
+                const label = (card.dataset.label || '').toLowerCase();
+                const match = !q || id.includes(q) || label.includes(q);
                 card.style.display = match ? 'flex' : 'none';
             });
         });

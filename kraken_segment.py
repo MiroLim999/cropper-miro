@@ -107,8 +107,49 @@ else:                          # light text on dark background
     ink = gray > g_th
 
 
+# ── Grid-line (table border) detection ────────────────────────────────────────
+# Long straight horizontal / vertical ink runs are table or form lines. They are
+# removed from the ink mask so they never join words, and they define "cells"
+# that every word crop is later clipped to.
+def detect_grid(ink_mask):
+    H, W = ink_mask.shape
+    u = ink_mask.astype(np.uint8)
+    Lh = max(40, W // 15)
+    Lv = max(40, H // 15)
+    hor = ndimage.maximum_filter1d(ndimage.minimum_filter1d(u, Lh, axis=1), Lh, axis=1).astype(bool)
+    ver = ndimage.maximum_filter1d(ndimage.minimum_filter1d(u, Lv, axis=0), Lv, axis=0).astype(bool)
+    # thicken by 1px to swallow anti-aliased edges
+    hor = ndimage.maximum_filter1d(hor.astype(np.uint8), 3, axis=0).astype(bool)
+    ver = ndimage.maximum_filter1d(ver.astype(np.uint8), 3, axis=1).astype(bool)
+    return hor, ver
+
+
+h_lines, v_lines = detect_grid(ink)
+grid_mask = h_lines | v_lines
+has_grid = bool(grid_mask.sum() > 0) and (h_lines.any() or v_lines.any())
+ink = ink & ~grid_mask
+
+if has_grid:
+    cell_lbl, _n_cells = ndimage.label(~grid_mask)
+    cell_objs = ndimage.find_objects(cell_lbl)
+else:
+    cell_lbl, cell_objs = None, None
+
+
+def cell_bounds(x, y, w, h):
+    """Bounds (x0,y0,x1,y1) of the grid cell containing the box centre."""
+    if cell_lbl is None:
+        return None
+    cx = min(im_w - 1, max(0, x + w // 2)); cy = min(im_h - 1, max(0, y + h // 2))
+    k = int(cell_lbl[cy, cx])
+    if k == 0:
+        return None
+    sl = cell_objs[k - 1]
+    return [int(sl[1].start), int(sl[0].start), int(sl[1].stop), int(sl[0].stop)]
+
+
 # ── Split one (masked) line into words ────────────────────────────────────────
-def segment_line_into_words(line_ink):
+def segment_line_into_words(line_ink, vcols=None):
     """
     line_ink: boolean ndarray (H, W) – True where ink belongs to this line.
     Returns list of word boxes relative to the line crop.
@@ -177,7 +218,8 @@ def segment_line_into_words(line_ink):
 
     words, curr = [], [merged[0]]
     for i, gap in enumerate(gaps):
-        if gap > gap_th:
+        crosses_grid = vcols is not None and vcols[merged[i][2]:merged[i + 1][0]].any()
+        if gap > gap_th or crosses_grid:
             words.append(box(curr))
             curr = [merged[i + 1]]
         else:
@@ -256,7 +298,8 @@ for li, ln in enumerate(lines):
         line_ink = line_ink & np.asarray(mask_img, dtype=bool)
 
     try:
-        rel = segment_line_into_words(line_ink)
+        vc = v_lines[y0:y1, x0:x1].any(axis=0) if has_grid else None
+        rel = segment_line_into_words(line_ink, vc)
     except Exception:
         rel = []
     if not rel:
@@ -297,9 +340,50 @@ for b in all_word_boxes:
     if all(overlap_ratio(b, k) < 0.8 for k in kept):
         kept.append(b)
 
+# ── Keep ONLY handwritten words (drop machine-printed text) ───────────────────
+# Heuristics (no extra model needed):
+#   1. Ink colour – if the page has coloured ink (blue/red pen) over black print,
+#      words whose ink is mostly coloured are handwriting.
+#   2. Stroke-width regularity – printed glyphs have near-constant stroke width,
+#      pen strokes vary. Measured on the ridge of the distance transform.
+HANDWRITTEN_ONLY = os.environ.get("KRAKEN_HANDWRITTEN_ONLY", "0") == "1"
+CV_THRESHOLD = float(os.environ.get("KRAKEN_HW_CV", "0.30"))
+rgb = np.asarray(im, dtype=np.int16)
+chroma = rgb.max(axis=2) - rgb.min(axis=2)
+colored_ink = ink & (chroma > 45)
+page_colored = colored_ink.sum() > max(200, 0.02 * ink.sum())
+
+
+def is_handwritten(b):
+    x, y, w, h = b["x"], b["y"], b["w"], b["h"]
+    m = ink[y:y + h, x:x + w]
+    n = int(m.sum())
+    if n < 20:
+        return False
+    if page_colored:
+        return colored_ink[y:y + h, x:x + w].sum() / n > 0.35
+    dt = ndimage.distance_transform_edt(m)
+    ridge = (dt == ndimage.maximum_filter(dt, size=3)) & (dt > 0.5)
+    vals = dt[ridge]
+    if vals.size < 8:
+        return False
+    cv = float(vals.std() / max(vals.mean(), 1e-6))
+    return cv > CV_THRESHOLD
+
+
+if HANDWRITTEN_ONLY:
+    hw = [b for b in kept if is_handwritten(b)]
+    if hw:
+        kept = hw
+    else:
+        print("No handwritten words detected; keeping all words.", file=sys.stderr)
+
 # ── Reading order: Kraken line order, then left → right ──────────────────────
 kept.sort(key=lambda b: (b["_line"], b["x"]))
 for b in kept:
     b.pop("_line", None)
+    cb = cell_bounds(b["x"], b["y"], b["w"], b["h"])
+    if cb:
+        b["cell"] = cb
 
 print(json.dumps(kept))

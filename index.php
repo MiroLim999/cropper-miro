@@ -1,358 +1,16 @@
 <?php
-// ── HTR Dataset Preparation (paths) ─────────────────────────────────────────
-$outputDir   = __DIR__ . '/output/';          // word crops saved from the cropper UI
-$htrDir      = __DIR__ . '/htr_dataset/';     // batch-processed, HTR-ready dataset
-$htrImageDir = $htrDir . 'images/';
-$htrExcelRel = 'htr_dataset/dataset_labels.xlsx';
-$htrExcelAbs = __DIR__ . '/' . $htrExcelRel;
-
-if (!is_dir($outputDir))   mkdir($outputDir, 0777, true);
-if (!is_dir($htrImageDir)) mkdir($htrImageDir, 0777, true);
-
-/**
- * Normalizes a single saved word-crop so it's ready to feed into an HTR
- * model: grayscale, auto-trimmed to its ink bounding box, contrast-stretched,
- * then resized to a fixed height (preserving aspect ratio) with a small
- * clean margin — the standard input shape used by CRNN/Transformer HTR
- * architectures (e.g. IAM-style word strips).
- */
-function prepareImageForHTR(\GdImage $src, int $targetHeight = 64, int $margin = 6): ?\GdImage
-{
-    imagefilter($src, IMG_FILTER_GRAYSCALE);
-
-    $w = imagesx($src);
-    $h = imagesy($src);
-    if ($w < 2 || $h < 2) {
-        return null;
-    }
-
-    // Auto-trim: find the bounding box of "ink" pixels (darker than threshold)
-    $threshold = 200; // 0-255; pixels darker than this count as ink
-    $minX = $w; $minY = $h; $maxX = 0; $maxY = 0;
-    $found = false;
-
-    for ($y = 0; $y < $h; $y++) {
-        for ($x = 0; $x < $w; $x++) {
-            $gray = imagecolorat($src, $x, $y) & 0xFF; // R=G=B after grayscale filter
-            if ($gray < $threshold) {
-                $found = true;
-                if ($x < $minX) $minX = $x;
-                if ($x > $maxX) $maxX = $x;
-                if ($y < $minY) $minY = $y;
-                if ($y > $maxY) $maxY = $y;
-            }
-        }
-    }
-
-    if (!$found) {
-        $minX = 0; $minY = 0; $maxX = $w - 1; $maxY = $h - 1;
-    }
-
-    $cropW = $maxX - $minX + 1;
-    $cropH = $maxY - $minY + 1;
-
-    $trimmed = imagecreatetruecolor($cropW, $cropH);
-    $white = imagecolorallocate($trimmed, 255, 255, 255);
-    imagefill($trimmed, 0, 0, $white);
-    imagecopy($trimmed, $src, 0, 0, $minX, $minY, $cropW, $cropH);
-
-    // Stretch contrast so ink reads darker and background reads brighter,
-    // which keeps crops from many different scans/lighting consistent.
-    imagefilter($trimmed, IMG_FILTER_CONTRAST, -20);
-
-    // Resize to a fixed height, preserving aspect ratio (variable width is
-    // expected/required by sequence-based HTR models).
-    $scale = $targetHeight / $cropH;
-    $newW = max(1, (int) round($cropW * $scale));
-    $newH = $targetHeight;
-
-    $resized = imagecreatetruecolor($newW, $newH);
-    $whiteR = imagecolorallocate($resized, 255, 255, 255);
-    imagefill($resized, 0, 0, $whiteR);
-    imagecopyresampled($resized, $trimmed, 0, 0, 0, 0, $newW, $newH, $cropW, $cropH);
-    imagedestroy($trimmed);
-
-    // Small white margin on every side (standard practice for CTC/CRNN HTR
-    // inputs, avoids clipping ascenders/descenders at the image edge).
-    $finalW = $newW + $margin * 2;
-    $finalH = $newH + $margin * 2;
-    $final = imagecreatetruecolor($finalW, $finalH);
-    $whiteF = imagecolorallocate($final, 255, 255, 255);
-    imagefill($final, 0, 0, $whiteF);
-    imagecopy($final, $resized, $margin, $margin, 0, 0, $newW, $newH);
-    imagedestroy($resized);
-
-    return $final;
-}
-
-/**
- * Batch-processes every saved word image in output/ into HTR-ready training
- * data (see prepareImageForHTR) saved under htr_dataset/images/, then writes
- * an Excel (.xlsx) manifest mapping each processed image to a blank
- * "transcription" column ready for human labeling.
- *
- * @return array{success:bool, processed:int, skipped:int, manifest:array}
- */
-function batchProcessForHTR(string $outputDir, string $htrImageDir, string $htrExcelAbs, int $targetHeight = 64): array
-{
-    $allowedExt = ['png', 'jpg', 'jpeg', 'webp'];
-    $files = glob($outputDir . '*') ?: [];
-    sort($files);
-
-    $manifest = [];
-    $processed = 0;
-    $skipped = 0;
-    $index = 0;
-
-    foreach ($files as $path) {
-        if (!is_file($path)) {
-            continue;
-        }
-        $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
-        if (!in_array($ext, $allowedExt, true)) {
-            $skipped++;
-            continue;
-        }
-
-        $mime = mime_content_type($path);
-        $src = match ($mime) {
-            'image/jpeg' => imagecreatefromjpeg($path),
-            'image/png'  => imagecreatefrompng($path),
-            'image/webp' => imagecreatefromwebp($path),
-            default      => null,
-        };
-        if (!$src) {
-            $skipped++;
-            continue;
-        }
-
-        $prepared = prepareImageForHTR($src, $targetHeight);
-        imagedestroy($src);
-        if (!$prepared) {
-            $skipped++;
-            continue;
-        }
-
-        $index++;
-        $newFilename = sprintf('htr_%04d.png', $index);
-        imagepng($prepared, $htrImageDir . $newFilename, 6);
-        $finalW = imagesx($prepared);
-        $finalH = imagesy($prepared);
-        imagedestroy($prepared);
-
-        $manifest[] = [
-            'id'                 => $index,
-            'original_filename'  => basename($path),
-            'processed_filename' => $newFilename,
-            'relative_path'      => 'htr_dataset/images/' . $newFilename,
-            'width'              => $finalW,
-            'height'             => $finalH,
-            'transcription'      => '', // fill in ground-truth text before training
-        ];
-        $processed++;
-    }
-
-    writeXlsx(
-        $htrExcelAbs,
-        'HTR Dataset',
-        ['ID', 'Image Filename', 'Relative Path', 'Width', 'Height', 'Transcription'],
-        array_map(
-            fn($r) => [$r['id'], $r['processed_filename'], $r['relative_path'], $r['width'], $r['height'], $r['transcription']],
-            $manifest
-        )
-    );
-
-    return [
-        'success'   => true,
-        'processed' => $processed,
-        'skipped'   => $skipped,
-        'manifest'  => $manifest,
-    ];
-}
-
-/**
- * Writes a minimal single-sheet Excel (.xlsx) file using a hand-rolled ZIP
- * container (see createMinimalZip) so it works even when the ext-zip
- * extension is disabled — no Composer/PhpSpreadsheet dependency required.
- * Cell values are written as inline strings so no shared-strings part is
- * needed, keeping the workbook small and dependency-free.
- */
-function writeXlsx(string $path, string $sheet, array $headers, array $rows): bool
-{
-    $sheetXml = xlsxBuildSheetXml(array_merge([$headers], $rows));
-    $sheetNameEsc = htmlspecialchars($sheet, ENT_XML1 | ENT_QUOTES, 'UTF-8');
-
-    $contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' .
-        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' .
-        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' .
-        '<Default Extension="xml" ContentType="application/xml"/>' .
-        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' .
-        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' .
-        '</Types>';
-
-    $rootRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' .
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' .
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' .
-        '</Relationships>';
-
-    $workbook = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' .
-        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' .
-        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' .
-        '<sheets><sheet name="' . $sheetNameEsc . '" sheetId="1" r:id="rId1"/></sheets>' .
-        '</workbook>';
-
-    $workbookRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' .
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' .
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' .
-        '</Relationships>';
-
-    return createMinimalZip($path, [
-        '[Content_Types].xml'        => $contentTypes,
-        '_rels/.rels'                => $rootRels,
-        'xl/workbook.xml'            => $workbook,
-        'xl/_rels/workbook.xml.rels' => $workbookRels,
-        'xl/worksheets/sheet1.xml'   => $sheetXml,
-    ]);
-}
-
-/**
- * Creates a ZIP archive from an in-memory map of entries without requiring
- * the ext-zip extension — only PHP's always-available zlib functions
- * (gzdeflate) and crc32() are used. This keeps Excel export working even on
- * PHP installs where ext-zip is disabled (a common default on XAMPP/Laragon).
- *
- * @param array<string,string> $files Map of in-archive path => raw file contents
- */
-function createMinimalZip(string $zipPath, array $files): bool
-{
-    $dir = dirname($zipPath);
-    if (!is_dir($dir)) {
-        mkdir($dir, 0777, true);
-    }
-
-    $localParts = [];
-    $centralParts = [];
-    $offset = 0;
-    $dosTime = 0;
-    $dosDate = (1 << 5) | 1; // Jan 1, 1980 — timestamp is irrelevant for this manifest
-
-    foreach ($files as $name => $contents) {
-        $nameEnc = str_replace('\\', '/', $name);
-        $crc = crc32($contents);
-        $uncompressedSize = strlen($contents);
-        $compressed = gzdeflate($contents, 6);
-        $compressedSize = strlen($compressed);
-
-        $localHeader = pack(
-            'VvvvvvVVVvv',
-            0x04034b50,
-            20,
-            0,
-            8,
-            $dosTime,
-            $dosDate,
-            $crc,
-            $compressedSize,
-            $uncompressedSize,
-            strlen($nameEnc),
-            0
-        ) . $nameEnc . $compressed;
-
-        $localParts[] = $localHeader;
-
-        $centralParts[] = pack(
-            'VvvvvvvVVVvvvvvVV',
-            0x02014b50,
-            20,
-            20,
-            0,
-            8,
-            $dosTime,
-            $dosDate,
-            $crc,
-            $compressedSize,
-            $uncompressedSize,
-            strlen($nameEnc),
-            0,
-            0,
-            0,
-            0,
-            0x81A40000,
-            $offset
-        ) . $nameEnc;
-
-        $offset += strlen($localHeader);
-    }
-
-    $localData = implode('', $localParts);
-    $centralData = implode('', $centralParts);
-
-    $endRecord = pack(
-        'VvvvvVVv',
-        0x06054b50,
-        0,
-        0,
-        count($files),
-        count($files),
-        strlen($centralData),
-        strlen($localData),
-        0
-    );
-
-    if (file_exists($zipPath)) {
-        @unlink($zipPath);
-    }
-
-    return file_put_contents($zipPath, $localData . $centralData . $endRecord) !== false;
-}
-
-/** Builds <sheetData> XML for a 2D array of rows using inline strings. */
-function xlsxBuildSheetXml(array $rows): string
-{
-    $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' .
-        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' .
-        '<sheetData>';
-
-    foreach ($rows as $rowIdx => $row) {
-        $r = $rowIdx + 1;
-        $xml .= '<row r="' . $r . '">';
-        foreach (array_values($row) as $colIdx => $value) {
-            $cellRef = xlsxColumnLetter($colIdx) . $r;
-            if (is_numeric($value) && $value !== '') {
-                $xml .= '<c r="' . $cellRef . '"><v>' . htmlspecialchars((string) $value, ENT_XML1) . '</v></c>';
-            } else {
-                $escaped = htmlspecialchars((string) $value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
-                $xml .= '<c r="' . $cellRef . '" t="inlineStr"><is><t xml:space="preserve">' . $escaped . '</t></is></c>';
-            }
-        }
-        $xml .= '</row>';
-    }
-
-    $xml .= '</sheetData></worksheet>';
-    return $xml;
-}
-
-/** Converts a 0-based column index to an Excel column letter (0 -> A, 26 -> AA, ...). */
-function xlsxColumnLetter(int $index): string
-{
-    $letter = '';
-    $index++;
-    while ($index > 0) {
-        $mod = ($index - 1) % 26;
-        $letter = chr(65 + $mod) . $letter;
-        $index = (int) (($index - $mod) / 26);
-    }
-    return $letter;
-}
+require __DIR__ . '/htr_lib.php';
 
 // ── AJAX: run the HTR batch-processing job and return a JSON summary ───────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch_process_htr') {
     header('Content-Type: application/json');
     $result = batchProcessForHTR($outputDir, $htrImageDir, $htrExcelAbs);
     echo json_encode([
-        'success'    => $result['success'],
-        'processed'  => $result['processed'],
-        'skipped'    => $result['skipped'],
+        'success' => $result['success'],
+        'processed' => $result['processed'],
+        'skipped' => $result['skipped'],
+        'new' => $result['new'],
+        'total' => count($result['manifest']),
         'excel_file' => $htrExcelRel,
         'images_dir' => 'htr_dataset/images/',
     ]);
@@ -722,16 +380,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
             Kraken BLLA Engine
         </div>
         <h1>Word Cropper</h1>
-        <p class="subtitle">Upload an image to segment and extract individual cropped words using Kraken.</p>
+        <p class="subtitle">Upload document pages: table grids are cropped cell by cell, other text word by word (Kraken).</p>
+        <p class="subtitle" style="margin-top:8px;"><a href="batch.php" style="color:#fff;font-weight:700;">📁 Scan a whole folder →</a> (scan every file, verify and save one by one)</p>
     </div>
 
     <div class="kc">
         <form class="kc-form" id="kcForm" action="process.php" method="POST" enctype="multipart/form-data">
             <div class="kc-drop" id="kcDrop">
-                <input type="file" name="image" id="kcFile" accept="image/png,image/jpeg,image/webp" required>
+                <input type="file" name="images[]" id="kcFile" accept="application/pdf,.pdf,image/png,image/jpeg,image/webp" multiple required>
                 <div class="kc-drop-icon">📄</div>
-                <div class="kc-drop-title">Drop your image here or click to browse</div>
-                <div class="kc-drop-sub">Supports PNG, JPG, WEBP • Max 20MB</div>
+                <div class="kc-drop-title">Drop your document pages here or click to browse</div>
+                <div class="kc-drop-sub">PDF, or one or many page images (PNG, JPG, WEBP) • tables are cropped cell by cell</div>
             </div>
 
             <div class="kc-preview" id="kcPreview">
@@ -761,7 +420,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
 
             <button type="submit" class="kc-submit" id="kcSubmit">
                 <span class="kc-spinner" id="kcSpin"></span>
-                <span id="kcBtnText">Scan &amp; Crop Words</span>
+                <span id="kcBtnText">Scan &amp; Crop Document</span>
             </button>
         </form>
     </div>
@@ -772,7 +431,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
                 <div class="kc-drop-title" style="margin-bottom:4px;">Prepare HTR Training Dataset</div>
                 <div class="kc-drop-sub">Batch-processes every image saved in <code>output/</code> into
                     model-ready crops (grayscale, trimmed, height-normalized) and exports an Excel manifest
-                    (<code>htr_dataset/dataset_labels.xlsx</code>) for transcription labeling.</div>
+                    (<code>htr_dataset/dataset_labels.xlsx</code>). Then open the annotation tool to type the word of each image.</div>
             </div>
             <button type="button" class="kc-submit" id="htrSubmit">
                 <span class="kc-spinner" id="htrSpin"></span>
@@ -787,6 +446,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
             const $ = (id) => document.getElementById(id);
             const drop = $('kcDrop');
             const file = $('kcFile');
+            const MAX_FILES = <?= (int) ini_get('max_file_uploads') ?: 20 ?>;
             const preview = $('kcPreview');
 
             $('kcPad').addEventListener('input', (e) => {
@@ -810,10 +470,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
             file.addEventListener('change', () => {
                 const f = file.files[0];
                 if (!f) return;
+                const total = file.files.length;
+                if (total > MAX_FILES) {
+                    alert('This server accepts at most ' + MAX_FILES + ' files per upload (' + total +
+                          ' selected).\nPut the pages into one PDF (a PDF can have any number of pages) or upload in groups.');
+                    file.value = '';
+                    return;
+                }
+                const names = total > 1 ? total + ' files selected' : f.name + ' (' + (f.size / 1024).toFixed(1) + ' KB)';
                 const reader = new FileReader();
                 reader.onload = (e) => {
-                    $('kcImg').src = e.target.result;
-                    $('kcName').textContent = f.name + ' (' + (f.size / 1024).toFixed(1) + ' KB)';
+                    $('kcImg').src = f.type === 'application/pdf'
+                        ? 'data:image/svg+xml;utf8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="240" height="140"><rect width="100%" height="100%" fill="#18181d"/><text x="50%" y="55%" fill="#fff" font-size="28" font-family="sans-serif" text-anchor="middle">PDF</text></svg>')
+                        : e.target.result;
+                    $('kcName').textContent = names;
                     drop.style.display = 'none';
                     preview.style.display = 'block';
                 };
@@ -830,7 +500,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
             $('kcForm').addEventListener('submit', () => {
                 $('kcSubmit').disabled = true;
                 $('kcSpin').style.display = 'inline-block';
-                $('kcBtnText').textContent = 'Scanning with Kraken...';
+                $('kcBtnText').textContent = 'Scanning pages...';
             });
 
             // Batch-process everything saved in output/ into an HTR-ready dataset
@@ -855,8 +525,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
                     if (data.success) {
                         result.innerHTML = data.processed > 0
                             ? `✓ Processed ${data.processed} image(s) into <code>${data.images_dir}</code> ` +
-                              `(${data.skipped} skipped).<br>` +
-                              `<a href="${data.excel_file}" download style="color:#fff;font-weight:700;">⬇ Download dataset_labels.xlsx</a>`
+                            `(${data.skipped} skipped).<br>` +
+                            `<a href="annotate.php" style="color:#fff;font-weight:800;">✍️ Open annotation tool (${data.total} images)</a> &nbsp;·&nbsp; ` +
+                            `<a href="${data.excel_file}" download style="color:#fff;font-weight:700;">⬇ dataset_labels.xlsx</a>`
                             : 'No images found in output/ yet. Save some cropped words first.';
                     } else {
                         result.textContent = 'Batch processing failed.';
