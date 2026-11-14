@@ -58,10 +58,38 @@ if ($action === 'save') {
     out(['ok' => true, 'status' => $status, 'text' => $text, 'stats' => stats($items)]);
 }
 
+if ($action === 'import') {
+    $up = $_FILES['file'] ?? null;
+    if (!$up || $up['error'] !== UPLOAD_ERR_OK || $up['size'] > 10 * 1024 * 1024) out(['ok' => false, 'error' => 'No file received (max 10 MB).'], 400);
+    $overwrite = ($_POST['overwrite'] ?? '0') === '1';
+    try {
+        $rows = htrParseLabelFile($up['tmp_name'], (string) $up['name']);
+    } catch (Throwable $e) {
+        out(['ok' => false, 'error' => $e->getMessage()], 400);
+    }
+    if (!$items) out(['ok' => false, 'error' => 'There is no dataset yet. Run "Batch Process for HTR" first.'], 400);
+    $merge = htrMergeLabels($items, $rows, $overwrite);
+    if ($merge['updated'] > 0) {
+        htrSaveManifest($items);
+        htrExportLabels($items);          // keep xlsx / csv / tsv in step with the manifest
+    }
+    out(['ok' => true, 'merge' => $merge, 'stats' => stats($items)]);
+}
+
+
+if ($action === 'build_zip') {
+    require_once __DIR__ . '/dataset_export.php';
+    $presets = ['80-10-10' => [0.8, 0.1, 0.1], '70-15-15' => [0.7, 0.15, 0.15], '60-20-20' => [0.6, 0.2, 0.2]];
+    $fr = $presets[(string) ($_POST['split'] ?? '80-10-10')] ?? $presets['80-10-10'];
+    htrExportLabels($items);                  // keep the other label files in step first
+    $res = dsBuildZip($items, $fr);
+    out($res, $res['ok'] ? 200 : 400);
+}
+
 if ($action === 'export') {
     $res = htrExportLabels($items);
     out(['ok' => true, 'labeled' => $res['labeled'], 'stats' => stats($items),
-         'files' => ['htr_dataset/dataset_labels.xlsx', 'htr_dataset/labels.csv', 'htr_dataset/labels.tsv']]);
+         'files' => ['htr_dataset/dataset_labels.xlsx', 'htr_dataset/annotated_labels.xlsx', 'htr_dataset/labels.csv', 'htr_dataset/labels.tsv']]);
 }
 
 out(['ok' => false, 'error' => 'unknown action'], 400);

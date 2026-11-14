@@ -62,11 +62,15 @@
         #msg { min-height:1.2em; font-size:.78rem; color:var(--ok); }
         #links a { color:#fff; font-weight:700; margin-right:14px; font-size:.82rem; }
     </style>
+    <link rel="stylesheet" href="sneat.css">
+    <script src="confirm.js"></script>
+    <script src="labels-io.js"></script>
 </head>
 <body>
     <header class="navbar">
         <div class="brand"><span>Word Cropper</span><span class="pill">Annotate</span></div>
         <div style="display:flex;gap:8px">
+            <button class="btn" id="impBtn">⬆ Import annotated</button>
             <button class="btn" id="exportBtn">⬇ Export labels</button>
             <a class="btn" href="index.php">← Back</a>
         </div>
@@ -231,6 +235,7 @@
     $('search').oninput = (e) => { query = e.target.value.trim().toLowerCase(); renderList(); };
 
     $('exportBtn').onclick = async () => {
+        if (!await askConfirm({ title: 'Export the labels?', message: 'dataset_labels.xlsx, labels.csv and labels.tsv are rewritten with the current labels.', confirmText: 'Export' })) return;
         await autosave();
         const j = await post({action: 'export'});
         if (j.ok) {
@@ -238,6 +243,11 @@
             $('msg').style.color = 'var(--ok)'; $('msg').textContent = '✓ Exported ' + j.labeled + ' labeled image(s).';
         }
     };
+
+    $('impBtn').onclick = () => LabelsIO.pickAndImport({
+        onMsg: (t, ok) => { $('msg').style.color = ok ? 'var(--ok)' : 'var(--err)'; $('msg').textContent = t; },
+        onMerged: () => setTimeout(() => location.reload(), 1500)
+    });
 
     (async () => {
         const j = await post({action: 'list'});

@@ -11,6 +11,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
         'skipped' => $result['skipped'],
         'new' => $result['new'],
         'total' => count($result['manifest']),
+        'labeled' => count(array_filter($result['manifest'], fn($r) => ($r['status'] ?? '') === 'labeled')),
+        'unreadable' => count(array_filter($result['manifest'], fn($r) => ($r['status'] ?? '') === 'unreadable')),
         'excel_file' => $htrExcelRel,
         'images_dir' => 'htr_dataset/images/',
     ]);
@@ -370,9 +372,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
             }
         }
     </style>
+    <link rel="stylesheet" href="sneat.css">
+    <script src="confirm.js"></script>
+    <script src="labels-io.js"></script>
 </head>
 
 <body>
+
+    <?php $savedCount = isset($_GET['saved']) ? max(0, (int) $_GET['saved']) : 0; ?>
+    <?php if ($savedCount > 0): ?>
+        <div class="kc-alert" id="kcAlert">
+            <span class="kc-alert-ic">✓</span>
+            <span><b><?= $savedCount ?></b> picture<?= $savedCount === 1 ? '' : 's' ?> saved to <code>output/</code>. You can upload another document below.</span>
+            <button type="button" onclick="this.parentNode.remove()" aria-label="Close">×</button>
+        </div>
+    <?php endif; ?>
 
     <div class="header">
         <div class="engine-badge">
@@ -381,16 +395,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
         </div>
         <h1>Word Cropper</h1>
         <p class="subtitle">Upload document pages: table grids are cropped cell by cell, other text word by word (Kraken).</p>
-        <p class="subtitle" style="margin-top:8px;"><a href="batch.php" style="color:#fff;font-weight:700;">📁 Scan a whole folder →</a> (scan every file, verify and save one by one)</p>
     </div>
 
     <div class="kc">
         <form class="kc-form" id="kcForm" action="process.php" method="POST" enctype="multipart/form-data">
+            <div class="kc-drops" id="kcDrops">
             <div class="kc-drop" id="kcDrop">
                 <input type="file" name="images[]" id="kcFile" accept="application/pdf,.pdf,image/png,image/jpeg,image/webp" multiple required>
                 <div class="kc-drop-icon">📄</div>
-                <div class="kc-drop-title">Drop your document pages here or click to browse</div>
+                <div class="kc-drop-title">Single: drop pages here or click to browse</div>
                 <div class="kc-drop-sub">PDF, or one or many page images (PNG, JPG, WEBP) • tables are cropped cell by cell</div>
+            </div>
+            <a class="kc-drop kc-batch" href="batch.php">
+                <div class="kc-drop-icon">📁</div>
+                <div class="kc-drop-title">Batch: scan a whole folder</div>
+                <div class="kc-drop-sub">Every file and sub-folder is scanned, then you verify and save one by one</div>
+            </a>
             </div>
 
             <div class="kc-preview" id="kcPreview">
@@ -437,6 +457,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
                 <span class="kc-spinner" id="htrSpin"></span>
                 <span id="htrBtnText">⚙️ Batch Process for HTR</span>
             </button>
+            <div class="kc-io">
+                <div class="kc-io-title">Annotated dataset</div>
+                <div class="kc-result-btns" style="margin-top:8px;">
+                    <button type="button" class="kc-btn" id="dlLabels">⬇ Download annotated only (.xlsx)</button>
+                    <button type="button" class="kc-btn" id="dlCsv">⬇ labels.csv</button>
+                    <button type="button" class="kc-btn" id="impLabels">⬆ Import annotated file</button>
+                </div>
+                <div class="kc-drop-sub" style="margin-top:8px;">Import an .xlsx, .csv, .tsv or manifest .json that was annotated elsewhere: its labels are merged into this dataset by image file name.</div>
+                <div id="ioMsg" class="kc-io-msg"></div>
+            </div>
+            <div class="kc-io">
+                <div class="kc-io-title">Training dataset (.zip)</div>
+                <div class="kc-drop-sub" style="margin-top:4px;">Packs every annotated image into <code>dataset_NNN.zip</code> with <code>train/</code>, <code>val/</code>, <code>test/</code>, <code>labels.csv</code>, <code>manifest.csv</code> and the validation / statistics files, ready to train the model.</div>
+                <div class="kc-result-btns" style="margin-top:10px;align-items:center;">
+                    <label class="kc-split">Split train / val / test
+                        <select id="zipSplit">
+                            <option value="80-10-10" selected>80 / 10 / 10</option>
+                            <option value="70-15-15">70 / 15 / 15</option>
+                            <option value="60-20-20">60 / 20 / 20</option>
+                        </select>
+                    </label>
+                    <button type="button" class="kc-btn primary" id="buildZip">📦 Build training dataset (.zip)</button>
+                </div>
+                <div id="zipMsg" class="kc-io-msg"></div>
+            </div>
             <div id="htrResult" style="display:none;font-size:.85rem;color:var(--kc-muted);line-height:1.6;"></div>
         </div>
     </div>
@@ -481,23 +526,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
                 const reader = new FileReader();
                 reader.onload = (e) => {
                     $('kcImg').src = f.type === 'application/pdf'
-                        ? 'data:image/svg+xml;utf8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="240" height="140"><rect width="100%" height="100%" fill="#18181d"/><text x="50%" y="55%" fill="#fff" font-size="28" font-family="sans-serif" text-anchor="middle">PDF</text></svg>')
+                        ? 'data:image/svg+xml;utf8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="240" height="140"><rect width="100%" height="100%" fill="#e7e7ff"/><text x="50%" y="55%" fill="#696cff" font-size="28" font-family="sans-serif" text-anchor="middle">PDF</text></svg>')
                         : e.target.result;
                     $('kcName').textContent = names;
-                    drop.style.display = 'none';
+                    $('kcDrops').style.display = 'none';
                     preview.style.display = 'block';
                 };
                 reader.readAsDataURL(f);
+            });
+
+            LabelsIO.wireZip({ btn: 'buildZip', split: 'zipSplit', msg: 'zipMsg' });
+            LabelsIO.wire({
+                download: ['dlLabels', 'dlCsv'], importBtn: 'impLabels', msg: 'ioMsg',
+                onMerged: () => {}
             });
 
             $('kcRemove').addEventListener('click', () => {
                 file.value = '';
                 $('kcImg').src = '';
                 preview.style.display = 'none';
-                drop.style.display = 'block';
+                $('kcDrops').style.display = 'grid';
             });
 
-            $('kcForm').addEventListener('submit', () => {
+            let scanConfirmed = false;
+            $('kcForm').addEventListener('submit', async (e) => {
+                if (!scanConfirmed) {
+                    e.preventDefault();
+                    const ok = await askConfirm({ title: 'Scan and crop this document?',
+                        message: 'A new scan clears the pictures currently in the output/ folder. Save anything you need first.',
+                        confirmText: 'Scan', danger: true });
+                    if (!ok) return;
+                    scanConfirmed = true;
+                    $('kcForm').requestSubmit();
+                    return;
+                }
                 $('kcSubmit').disabled = true;
                 $('kcSpin').style.display = 'inline-block';
                 $('kcBtnText').textContent = 'Scanning pages...';
@@ -509,6 +571,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
                 const spin = $('htrSpin');
                 const text = $('htrBtnText');
                 const result = $('htrResult');
+
+                if (!await askConfirm({ title: 'Prepare the HTR dataset?',
+                    message: 'Every image in output/ is processed and the dataset files (Excel, CSV, TSV) are rewritten.', confirmText: 'Run' })) return;
 
                 btn.disabled = true;
                 spin.style.display = 'inline-block';
@@ -523,11 +588,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
                     const data = await res.json();
 
                     if (data.success) {
+                        const done = (data.labeled || 0) + (data.unreadable || 0);
+                        const left = Math.max(0, data.total - done);
                         result.innerHTML = data.processed > 0
                             ? `✓ Processed ${data.processed} image(s) into <code>${data.images_dir}</code> ` +
                             `(${data.skipped} skipped).<br>` +
-                            `<a href="annotate.php" style="color:#fff;font-weight:800;">✍️ Open annotation tool (${data.total} images)</a> &nbsp;·&nbsp; ` +
-                            `<a href="${data.excel_file}" download style="color:#fff;font-weight:700;">⬇ dataset_labels.xlsx</a>`
+                            `<div class="kc-result-btns">` +
+                            `<a class="kc-btn primary" href="annotate.php">✍️ Open annotation tool (${data.total} images)` +
+                            `<span class="kc-prog ${left === 0 ? 'done' : ''}">${left === 0 ? '✓ All annotated' : done + ' annotated · ' + left + ' not done'}</span></a>` +
+                            `<a class="kc-btn" href="${data.excel_file}" download>⬇ dataset_labels.xlsx</a>` +
+                            `</div>`
                             : 'No images found in output/ yet. Save some cropped words first.';
                     } else {
                         result.textContent = 'Batch processing failed.';

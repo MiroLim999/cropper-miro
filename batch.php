@@ -110,6 +110,8 @@ $maxFiles = (int) ini_get('max_file_uploads');
         .modal img { max-width:90vw; max-height:80vh; background:#000; border-radius:8px; }
         .modal .cap { color:var(--muted); text-align:center; margin-top:10px; font-size:.85rem; }
     </style>
+    <link rel="stylesheet" href="sneat.css">
+    <script src="confirm.js"></script>
 </head>
 <body>
     <header class="navbar">
@@ -253,6 +255,7 @@ $maxFiles = (int) ini_get('max_file_uploads');
     /* ───────── scan queue ───────── */
     $('startBtn').onclick = async () => {
         if (!docs.length) return;
+        if (!await askConfirm({ title: `Scan ${docs.length} file(s)?`, message: 'Every file is scanned and cropped. You then check and save them one by one.', confirmText: 'Start scan' })) return;
         started = true;
         $('setup').style.display = 'none';
         $('session').style.display = 'flex';
@@ -403,6 +406,7 @@ $maxFiles = (int) ini_get('max_file_uploads');
 
     $('saveBtn').onclick = async () => {
         const d = docs[cur]; if (!d || !d.sel.size) return;
+        if (!await askConfirm({ title: `Save ${d.sel.size} ticked image(s)?`, message: 'They are kept in the output/ folder and the next file opens.', confirmText: 'Save' })) return;
         $('saveBtn').disabled = true; $('saveBtn').textContent = 'Saving…';
         try {
             const names = d.res.words.filter(w => d.sel.has(w.id)).map(w => w.filename);
@@ -418,7 +422,7 @@ $maxFiles = (int) ini_get('max_file_uploads');
 
     $('skipBtn').onclick = async () => {
         const d = docs[cur]; if (!d) return;
-        if (!confirm('Skip this file? Its cropped images will be discarded (nothing is saved).')) return;
+        if (!await askConfirm({ title: 'Skip this file?', message: 'Its cropped images will be discarded. Nothing is saved.', confirmText: 'Skip file', danger: true })) return;
         try { await post({action: 'discard', prefix: d.res.prefix}); } catch (e) {}
         d.status = 'skipped'; d.res = {prefix: d.res.prefix};
         renderQueue(); updateStats(); advance();
@@ -449,9 +453,9 @@ $maxFiles = (int) ini_get('max_file_uploads');
         const crops = docs.reduce((a, d) => a + d.saved, 0);
         const bad = docs.filter(d => d.status === 'error');
         $('done').innerHTML = `<h2>✓ All documents verified</h2>
-            <div><b style="color:#fff">${n('saved')}</b> file(s) saved · <b style="color:#fff">${crops}</b> cropped image(s) in <code>output/</code><br>
+            <div><b>${n('saved')}</b> file(s) saved · <b>${crops}</b> cropped image(s) in <code>output/</code><br>
             ${n('skipped')} skipped · ${bad.length} failed to scan.</div>
-            ${bad.length ? '<div style="margin-top:10px;font-size:.8rem;color:#f87171;text-align:left">' + bad.map(d => esc(d.rel) + ': ' + esc(d.error)).join('<br>') + '</div>' : ''}
+            ${bad.length ? '<div style="margin-top:10px;font-size:.8rem;color:var(--err);text-align:left">' + bad.map(d => esc(d.rel) + ': ' + esc(d.error)).join('<br>') + '</div>' : ''}
             <div style="margin-top:18px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
                 <button class="btn primary" id="toAnnotate">✍️ Prepare dataset &amp; annotate</button>
                 <a class="btn" href="batch.php">📁 Scan another folder</a></div>`;

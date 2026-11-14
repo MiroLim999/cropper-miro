@@ -1,0 +1,101 @@
+/* Download / import of the annotated dataset (used by index.php and annotate.php). */
+(function () {
+    const API = 'annotate_api.php';
+
+    async function call(fd) {
+        const r = await fetch(API, { method: 'POST', body: fd });
+        let j;
+        try { j = await r.json(); } catch (e) { throw new Error('unexpected server response'); }
+        if (!j.ok) throw new Error(j.error || 'request failed');
+        return j;
+    }
+    const form = (o) => { const fd = new FormData(); Object.entries(o).forEach(([k, v]) => fd.append(k, v)); return fd; };
+
+    // rewrite the files from the current annotations, then download one of them
+    async function download(file) {
+        const j = await call(form({ action: 'export' }));
+        if (!j.stats || !j.stats.total) throw new Error('There is no dataset yet. Run "Batch Process for HTR" first.');
+        if (!j.labeled) throw new Error('Nothing to download yet: no image has been annotated.');
+        const a = document.createElement('a');
+        a.href = file + '?v=' + Date.now();
+        a.download = file.split('/').pop();
+        document.body.appendChild(a); a.click(); a.remove();
+        return j;
+    }
+
+    function summary(m) {
+        const parts = [`${m.updated} label(s) added or updated`];
+        if (m.same) parts.push(`${m.same} already identical`);
+        if (m.kept) parts.push(`${m.kept} kept as they were (you already had a label)`);
+        if (m.missing) parts.push(`${m.missing} not in this dataset`);
+        if (m.empty) parts.push(`${m.empty} without a label`);
+        return parts.join(' · ');
+    }
+
+    function pickAndImport(o) {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.xlsx,.csv,.tsv,.json,.txt';
+        input.onchange = async () => {
+            const f = input.files[0];
+            if (!f) return;
+            const ok = await askConfirm({
+                title: 'Merge this annotated file?',
+                message: `${f.name} is read and its labels are merged into your dataset by image file name. Images you already labeled are kept.`,
+                confirmText: 'Merge', checkbox: 'Replace my existing labels when they differ'
+            });
+            if (!ok) return;
+            const overwrite = askConfirm.checked ? '1' : '0';
+            o.onMsg('Importing…', true);
+            try {
+                const j = await call(form({ action: 'import', overwrite, file: f }));
+                o.onMsg('✓ ' + summary(j.merge), true);
+                if (j.merge.updated > 0 && o.onMerged) o.onMerged(j);
+            } catch (err) {
+                o.onMsg('Import failed: ' + err.message, false);
+            }
+        };
+        input.click();
+    }
+
+    window.LabelsIO = {
+        pickAndImport,
+        // index.php wiring
+        // build and download the training zip (index.php)
+        wireZip(c) {
+            const $ = (id) => document.getElementById(id);
+            const msg = (html, ok) => { const el = $(c.msg); el.innerHTML = html; el.className = 'kc-io-msg ' + (ok ? 'ok' : 'err'); };
+            const esc = (s) => String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+            $(c.btn).addEventListener('click', async () => {
+                const split = $(c.split).value;
+                if (!await askConfirm({ title: 'Build the training dataset?',
+                    message: `Only finished (labeled) images are packed, split ${split.replace(/-/g, ' / ')} into train / val / test, and a new dataset_NNN.zip is created.`,
+                    confirmText: 'Build zip' })) return;
+                const btn = $(c.btn); btn.disabled = true; msg('Building the zip…', true);
+                try {
+                    const j = await call(form({ action: 'build_zip', split }));
+                    const k = j.counts, mb = (j.size / 1048576).toFixed(2);
+                    let h = `✓ <b>${esc(j.name)}.zip</b> created (${mb} MB): ${k.total} images · train ${k.train} · val ${k.val} · test ${k.test}` +
+                            (k.skipped ? ` · ${k.skipped} not annotated, left out` : '') + '.';
+                    (j.warnings || []).forEach(w => { h += `<br><span style="color:#e69500">⚠ ${esc(w)}</span>`; });
+                    h += `<div class="kc-result-btns"><a class="kc-btn primary" href="${esc(j.file)}" download>⬇ Download ${esc(j.name)}.zip</a></div>`;
+                    msg(h, true);
+                } catch (err) { msg('Could not build the zip: ' + esc(err.message), false); }
+                finally { btn.disabled = false; }
+            });
+        },
+
+        wire(c) {
+            const $ = (id) => document.getElementById(id);
+            const msg = (t, ok) => { const el = $(c.msg); el.textContent = t; el.className = 'kc-io-msg ' + (ok ? 'ok' : 'err'); };
+            const run = (btnId, file, label) => $(btnId).addEventListener('click', async () => {
+                if (!await askConfirm({ title: 'Download annotated data?', message: `Only the images you finished annotating go into ${label}; images still to label are left out.`, confirmText: 'Download' })) return;
+                try { const j = await download(file); msg(`✓ Downloaded ${label} (${j.labeled} labeled image(s)).`, true); }
+                catch (err) { msg(err.message, false); }
+            });
+            run(c.download[0], 'htr_dataset/annotated_labels.xlsx', 'annotated_labels.xlsx');
+            run(c.download[1], 'htr_dataset/labels.csv', 'labels.csv');
+            $(c.importBtn).addEventListener('click', () => pickAndImport({ onMsg: msg, onMerged: c.onMerged }));
+        }
+    };
+})();

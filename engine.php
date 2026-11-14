@@ -109,7 +109,7 @@ function saveCrop(\GdImage $src, int $x, int $y, int $w, int $h, int $padding,
     }
     imagedestroy($croppedImg);
 
-    return ['file' => 'uploads/previews/' . $filename, 'filename' => $filename, 'w' => $cw, 'h' => $ch];
+    return ['file' => 'uploads/previews/' . $filename, 'filename' => $filename, 'w' => $cw, 'h' => $ch, 'x' => $x0, 'y' => $y0];
 }
 
 /**
@@ -253,6 +253,7 @@ function scanUploads(array $uploads, string $prefix, int $padding, string $outpu
                 'filename' => $crop['filename'],
                 'w' => $crop['w'],
                 'h' => $crop['h'],
+                'crop' => ['x' => $crop['x'], 'y' => $crop['y']],
                 'box' => ['x' => $b['x'], 'y' => $b['y'], 'w' => $b['w'], 'h' => $b['h']],
             ];
         }

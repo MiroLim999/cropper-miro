@@ -142,6 +142,17 @@ function htrExportLabels(array $items): array
         ], $items)
     );
 
+    // only the finished (labeled) images: this is the file offered for download
+    writeXlsx(
+        $dir . 'annotated_labels.xlsx',
+        'Annotated',
+        ['ID', 'Image Filename', 'Relative Path', 'Width', 'Height', 'Transcription', 'Status'],
+        array_values(array_map(fn($r) => [
+            $r['id'], $r['processed_filename'], $r['relative_path'], $r['width'], $r['height'],
+            $r['transcription'], $r['status'],
+        ], array_filter($items, fn($r) => ($r['status'] ?? '') === 'labeled')))
+    );
+
     $csv = fopen($dir . 'labels.csv', 'w');
     fwrite($csv, "\xEF\xBB\xBF");   // BOM so Excel reads UTF-8
     fputcsv($csv, ['image', 'text']);
@@ -431,3 +442,170 @@ function xlsxColumnLetter(int $index): string
     return $letter;
 }
 
+
+/* ── Importing an already-annotated file and merging it into the manifest ───────── */
+
+/** Excel column letters ("A", "AB") -> 0-based index. */
+function htrColIndex(string $ref): int
+{
+    $n = 0;
+    foreach (str_split(strtoupper(preg_replace('/[^A-Za-z]/', '', $ref))) as $ch) $n = $n * 26 + (ord($ch) - 64);
+    return max(0, $n - 1);
+}
+
+/** Reads the first sheet of an .xlsx into rows of plain strings (shared + inline strings supported). */
+function htrReadXlsxRows(string $path): array
+{
+    $zip = new ZipArchive();
+    if ($zip->open($path) !== true) throw new RuntimeException('not a valid .xlsx file');
+    $read = function (string $name) use ($zip): ?string {
+        $st = $zip->statName($name);
+        if (!$st || $st['size'] > 30 * 1024 * 1024) return null;     // missing or suspiciously large
+        $d = $zip->getFromName($name);
+        return $d === false ? null : preg_replace('/ xmlns="[^"]*"/', '', $d, 1);
+    };
+    $shared = [];
+    if (($xml = $read('xl/sharedStrings.xml')) !== null) {
+        $sx = @simplexml_load_string($xml, 'SimpleXMLElement', LIBXML_NONET);
+        if ($sx) foreach ($sx->si as $si) {
+            $t = '';
+            if (isset($si->t)) $t = (string) $si->t;
+            else foreach ($si->r as $run) $t .= (string) $run->t;
+            $shared[] = $t;
+        }
+    }
+    $sheetXml = $read('xl/worksheets/sheet1.xml');
+    if ($sheetXml === null) {
+        for ($i = 0; $i < $zip->numFiles && $sheetXml === null; $i++) {
+            $n = $zip->getNameIndex($i);
+            if (preg_match('#^xl/worksheets/[^/]+\.xml$#', $n)) $sheetXml = $read($n);
+        }
+    }
+    $zip->close();
+    if ($sheetXml === null) throw new RuntimeException('no worksheet found in the .xlsx file');
+    $sx = @simplexml_load_string($sheetXml, 'SimpleXMLElement', LIBXML_NONET);
+    if (!$sx || !isset($sx->sheetData)) throw new RuntimeException('worksheet could not be read');
+
+    $rows = [];
+    foreach ($sx->sheetData->row as $row) {
+        $cells = [];
+        foreach ($row->c as $c) {
+            $idx = htrColIndex((string) $c['r']);
+            $t = (string) $c['t'];
+            if ($t === 's') $val = $shared[(int) $c->v] ?? '';
+            elseif ($t === 'inlineStr') {
+                $val = '';
+                if (isset($c->is->t)) $val = (string) $c->is->t;
+                else foreach ($c->is->r as $run) $val .= (string) $run->t;
+            } else $val = (string) $c->v;
+            $cells[$idx] = $val;
+        }
+        if ($cells) {
+            $max = max(array_keys($cells));
+            $line = [];
+            for ($i = 0; $i <= $max; $i++) $line[] = $cells[$i] ?? '';
+            $rows[] = $line;
+        }
+    }
+    return $rows;
+}
+
+/**
+ * Reads an annotated file (.xlsx / .csv / .tsv / manifest .json) into
+ * [['file' => basename, 'text' => string, 'status' => labeled|unreadable|pending|''], ...]
+ */
+function htrParseLabelFile(string $path, string $origName): array
+{
+    $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
+    $table = [];                       // list of string rows
+
+    if ($ext === 'json') {
+        $d = json_decode((string) file_get_contents($path), true);
+        if (!is_array($d)) throw new RuntimeException('the .json file is not a manifest');
+        $out = [];
+        foreach ($d as $r) {
+            if (!is_array($r)) continue;
+            $f = (string) ($r['processed_filename'] ?? $r['original_filename'] ?? '');
+            if ($f === '') continue;
+            $out[] = ['file' => basename($f), 'text' => (string) ($r['transcription'] ?? ''), 'status' => (string) ($r['status'] ?? ''),
+                      'orig' => (string) ($r['original_filename'] ?? '')];
+        }
+        return $out;
+    }
+
+    if ($ext === 'xlsx') {
+        $table = htrReadXlsxRows($path);
+    } elseif ($ext === 'csv' || $ext === 'tsv' || $ext === 'txt') {
+        $raw = (string) file_get_contents($path);
+        $raw = preg_replace('/^\xEF\xBB\xBF/', '', $raw);
+        if (!mb_check_encoding($raw, 'UTF-8')) throw new RuntimeException('the file is not UTF-8 text');
+        $delim = $ext === 'csv' ? ',' : "\t";
+        $fh = fopen('php://temp', 'r+');
+        fwrite($fh, $raw);
+        rewind($fh);
+        while (($row = fgetcsv($fh, 0, $delim, '"', '')) !== false) {
+            if ($row === [null]) continue;
+            $table[] = array_map('strval', $row);
+        }
+        fclose($fh);
+    } else {
+        throw new RuntimeException('use an .xlsx, .csv, .tsv or .json file');
+    }
+    if (!$table) return [];
+
+    // header row? find the columns by name, otherwise assume: image, text
+    $fi = 0; $ti = 1; $si = -1; $start = 0;
+    $head = array_map(fn($h) => strtolower(trim((string) $h)), $table[0]);
+    $hasHead = false;
+    foreach ($head as $i => $h) {
+        if (in_array($h, ['image', 'image filename', 'filename', 'file', 'processed_filename'], true)) { $fi = $i; $hasHead = true; }
+        elseif (in_array($h, ['text', 'transcription', 'label', 'word'], true)) { $ti = $i; $hasHead = true; }
+        elseif ($h === 'status') { $si = $i; $hasHead = true; }
+    }
+    if ($hasHead) $start = 1;
+
+    $out = [];
+    for ($i = $start; $i < count($table); $i++) {
+        $r = $table[$i];
+        $f = trim((string) ($r[$fi] ?? ''));
+        if ($f === '') continue;
+        $out[] = ['file' => basename(str_replace('\\', '/', $f)), 'text' => (string) ($r[$ti] ?? ''),
+                  'status' => $si >= 0 ? strtolower(trim((string) ($r[$si] ?? ''))) : '', 'orig' => ''];
+    }
+    return $out;
+}
+
+/**
+ * Merges parsed rows into $items (matched by processed_filename, then original_filename).
+ * Without $overwrite only images that are still "pending" are filled in; with it the
+ * imported label replaces an existing different one.
+ */
+function htrMergeLabels(array &$items, array $rows, bool $overwrite): array
+{
+    $byProc = []; $byOrig = [];
+    foreach ($items as $k => $r) {
+        $byProc[$r['processed_filename']] = $k;
+        $byOrig[$r['original_filename']][] = $k;
+    }
+    $st = ['rows' => count($rows), 'updated' => 0, 'same' => 0, 'kept' => 0, 'missing' => 0, 'empty' => 0];
+    foreach ($rows as $row) {
+        $text = preg_replace('/\s+/u', ' ', trim(mb_substr($row['text'], 0, 300)));
+        $status = $row['status'];
+        if (!in_array($status, ['labeled', 'unreadable', 'pending'], true)) $status = $text !== '' ? 'labeled' : '';
+        if ($status === 'labeled' && $text === '') $status = '';
+        if ($status === '' || $status === 'pending') { $st['empty']++; continue; }   // nothing to bring over
+        if ($status === 'unreadable') $text = '';
+
+        $k = $byProc[$row['file']] ?? null;
+        if ($k === null && !empty($row['orig']) && count($byOrig[$row['orig']] ?? []) === 1) $k = $byOrig[$row['orig']][0];
+        if ($k === null) { $st['missing']++; continue; }
+
+        $cur = $items[$k];
+        if ($cur['status'] === $status && $cur['transcription'] === $text) { $st['same']++; continue; }
+        if ($cur['status'] !== 'pending' && !$overwrite) { $st['kept']++; continue; }
+        $items[$k]['status'] = $status;
+        $items[$k]['transcription'] = $text;
+        $st['updated']++;
+    }
+    return $st;
+}

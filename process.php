@@ -45,6 +45,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     exit;
 }
 
+// ── Handle AJAX replace_crop: overwrite one crop with an adjusted version ───
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'replace_crop') {
+    header('Content-Type: application/json');
+    $name = basename((string) ($_POST['filename'] ?? ''));
+    $dst  = $previewDir . $name;
+    $ext  = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+    $up   = $_FILES['image'] ?? null;
+    if (!is_file($dst) || !in_array($ext, ['png', 'jpeg', 'webp'], true) || !$up || $up['error'] !== UPLOAD_ERR_OK || $up['size'] > 20 * 1024 * 1024) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'Bad crop upload']);
+        exit;
+    }
+    $img = @imagecreatefromstring((string) file_get_contents($up['tmp_name']));
+    if (!$img) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'Not a readable image']);
+        exit;
+    }
+    switch ($ext) {
+        case 'jpeg': imagejpeg($img, $dst, 95); break;
+        case 'webp': imagewebp($img, $dst, 95); break;
+        default:     imagepng($img, $dst);      break;
+    }
+    $w = imagesx($img);
+    $h = imagesy($img);
+    imagedestroy($img);
+    // a copy already saved to output/ would now be stale: refresh it
+    if (is_file($outputDir . $name)) copy($dst, $outputDir . $name);
+    echo json_encode(['success' => true, 'w' => $w, 'h' => $h]);
+    exit;
+}
+
 require __DIR__ . '/engine.php';
 
 // Clear output directory and old previews on new upload scan
@@ -761,6 +793,8 @@ function renderError(string $msg): never
         }
         .modal-close:hover { color: #ffffff; }
     </style>
+    <link rel="stylesheet" href="sneat.css">
+    <script src="confirm.js"></script>
 </head>
 <body>
 
@@ -776,7 +810,7 @@ function renderError(string $msg): never
     </header>
 
     <?php if ($warnings): ?>
-        <div style="background:#2a1d00;border-bottom:1px solid #6b4a00;color:#ffd78a;padding:10px 24px;font-size:.82rem;line-height:1.5;">
+        <div style="background:#fff2d6;border-bottom:1px solid #ffe0a3;color:#a16a00;padding:10px 24px;font-size:.82rem;line-height:1.5;">
             <strong><?= count($warnings) ?> file(s) skipped:</strong>
             <?= htmlspecialchars(implode(' • ', $warnings)) ?>
         </div>
@@ -878,18 +912,18 @@ function renderError(string $msg): never
                                     <span class="custom-chk"></span>
                                     <span><?= htmlspecialchars($w['label']) ?></span>
                                 </label>
-                                <span class="dim-badge"><?= $w['w'] ?>×<?= $w['h'] ?></span>
+                                <span class="dim-badge" id="dim-<?= $w['id'] ?>"><?= $w['w'] ?>×<?= $w['h'] ?></span>
                             </div>
 
-                            <div class="crop-preview-wrap" onclick="openModal('<?= htmlspecialchars($w['file']) ?>', '<?= htmlspecialchars($w['label']) ?> (<?= $w['w'] ?>×<?= $w['h'] ?> px)')">
-                                <img src="<?= htmlspecialchars($w['file']) ?>" alt="<?= htmlspecialchars($w['label']) ?>" loading="lazy">
+                            <div class="crop-preview-wrap" onclick="event.stopPropagation(); openModal(<?= $w['id'] ?>)">
+                                <img id="thumb-<?= $w['id'] ?>" src="<?= htmlspecialchars($w['file']) ?>" alt="<?= htmlspecialchars($w['label']) ?>" loading="lazy">
                             </div>
 
                             <div class="card-bottom">
                                 <button type="button" class="btn-single-dl" onclick="saveSingleWord(event, '<?= htmlspecialchars($w['filename']) ?>');">
                                     💾 Save
                                 </button>
-                                <button type="button" class="btn-zoom" title="Inspect" onclick="openModal('<?= htmlspecialchars($w['file']) ?>', '<?= htmlspecialchars($w['label']) ?> (<?= $w['w'] ?>×<?= $w['h'] ?> px)')">
+                                <button type="button" class="btn-zoom" title="Inspect" onclick="event.stopPropagation(); openModal(<?= $w['id'] ?>)">
                                     🔍 Zoom
                                 </button>
                             </div>
@@ -903,20 +937,45 @@ function renderError(string $msg): never
 
     </main>
 
-    <!-- Preview Modal -->
+    <!-- Preview Modal (view + adjust crop) -->
     <div class="modal" id="previewModal" onclick="closeModal()">
         <div class="modal-content" onclick="event.stopPropagation();">
             <div class="modal-header">
                 <h3 id="modalTitle" style="font-size:1rem; font-weight:700;">Word Preview</h3>
-                <button type="button" class="modal-close" onclick="closeModal()">×</button>
+                <div style="display:flex;align-items:center;gap:10px;">
+                    <button type="button" class="btn-action" id="adjustBtn">✂ Adjust crop</button>
+                    <button type="button" class="modal-close" onclick="closeModal()">×</button>
+                </div>
             </div>
             <img id="modalImg" src="" alt="Word Zoom">
+
+            <div id="cropEditor" style="display:none;">
+                <div class="ce-hint">Drag the box to move it, drag a handle to resize. The picture is re-cut from the page.</div>
+                <div class="ce-stage" id="ceStage">
+                    <canvas id="ceCanvas"></canvas>
+                    <div class="ce-rect" id="ceRect">
+                        <i data-h="nw"></i><i data-h="n"></i><i data-h="ne"></i><i data-h="e"></i>
+                        <i data-h="se"></i><i data-h="s"></i><i data-h="sw"></i><i data-h="w"></i>
+                    </div>
+                </div>
+                <div class="ce-bar">
+                    <span id="ceInfo"></span>
+                    <span style="display:flex;gap:8px;">
+                        <button type="button" class="btn-action" id="ceReset">Reset</button>
+                        <button type="button" class="btn-action" id="ceCancel">Cancel</button>
+                        <button type="button" class="btn-download-selected" id="ceApply">✓ Apply</button>
+                    </span>
+                </div>
+            </div>
         </div>
     </div>
+
+    <div id="toasts" aria-live="polite"></div>
 
     <!-- Client-Side Interactive Logic -->
     <script>
         const wordsData = <?= json_encode($croppedWords) ?>;
+        const pagesData = <?= json_encode(array_map(fn($p) => ['no' => $p['no'], 'w' => $p['w'], 'h' => $p['h']], $pages)) ?>;
         let selectedIds = new Set(wordsData.map(w => w.id));
 
         const selectedBadge = document.getElementById('selectedBadge');
@@ -941,6 +1000,41 @@ function renderError(string $msg): never
             currentZoom = 1.0;
             canvasWrap.style.transform = `scale(1.0)`;
         });
+
+        // After a successful save, return to the home page (short delay so the message can be read)
+        function goHome(count) {
+            setTimeout(() => { window.location.href = 'index.php?saved=' + encodeURIComponent(count); }, 1600);
+        }
+
+        // Toast message (type: ok | err); links = [{text, href}]
+        function toast(msg, type = 'ok', links = [], ms = 6000) {
+            const el = document.createElement('div');
+            el.className = 'toast ' + type;
+            const icon = document.createElement('span');
+            icon.className = 'toast-ic';
+            icon.textContent = type === 'ok' ? '✓' : '!';
+            const body = document.createElement('div');
+            body.className = 'toast-body';
+            const t = document.createElement('div');
+            t.textContent = msg;
+            body.appendChild(t);
+            if (links.length) {
+                const row = document.createElement('div');
+                row.className = 'toast-links';
+                links.forEach(l => {
+                    const a = document.createElement('a');
+                    a.href = l.href; a.textContent = l.text;
+                    row.appendChild(a);
+                });
+                body.appendChild(row);
+            }
+            const x = document.createElement('button');
+            x.type = 'button'; x.className = 'toast-x'; x.textContent = '×';
+            x.onclick = () => el.remove();
+            el.append(icon, body, x);
+            document.getElementById('toasts').appendChild(el);
+            setTimeout(() => el.remove(), ms);
+        }
 
         // Update selection UI state
         function updateSelectionState() {
@@ -1057,6 +1151,7 @@ function renderError(string $msg): never
             e.preventDefault();
             e.stopPropagation();
             const btn = e.currentTarget;
+            if (!await askConfirm({ title: 'Save this picture?', message: `${filename} will be added to the output/ folder.`, confirmText: 'Save' })) return;
             const origHtml = btn.innerHTML;
             btn.innerHTML = '💾...';
 
@@ -1068,11 +1163,14 @@ function renderError(string $msg): never
 
                 const res = await fetch('process.php', { method: 'POST', body: formData });
                 const data = await res.json();
+                if (!data.success || data.count < 1) throw new Error('file not found on the server');
 
                 btn.innerHTML = '✓ Saved in output/';
+                toast(`Added ${filename} to output/. Going back to the home page…`, 'ok');
+                goHome(1);
                 setTimeout(() => { btn.innerHTML = origHtml; }, 2000);
             } catch (err) {
-                alert('Error saving picture: ' + err.message);
+                toast('Could not save the picture: ' + err.message, 'err');
                 btn.innerHTML = origHtml;
             }
         }
@@ -1080,6 +1178,8 @@ function renderError(string $msg): never
         // Batch Save Selected into output/ folder only
         downloadSelectedBtn.addEventListener('click', async () => {
             if (selectedIds.size === 0) return;
+            if (!await askConfirm({ title: `Save ${selectedIds.size} selected picture(s)?`,
+                message: 'They are saved to the output/ folder and replace everything that is in it now.', confirmText: 'Save', danger: true })) return;
 
             downloadSelectedBtn.disabled = true;
             const origHtml = downloadSelectedBtn.innerHTML;
@@ -1097,29 +1197,165 @@ function renderError(string $msg): never
 
                 const res = await fetch('process.php', { method: 'POST', body: formData });
                 const data = await res.json();
+                if (!data.success) throw new Error('server refused the save');
 
                 downloadSelectedBtn.innerHTML = `<span>✓ Saved (${data.count} in output/)</span>`;
+                toast(`${data.count} picture(s) saved to output/ (replaces what was there before). Going back to the home page…`, 'ok');
+                goHome(data.count);
                 setTimeout(() => {
                     downloadSelectedBtn.disabled = false;
                     downloadSelectedBtn.innerHTML = origHtml;
                 }, 2000);
             } catch (err) {
-                alert('Error saving: ' + err.message);
+                toast('Could not save: ' + err.message, 'err');
                 downloadSelectedBtn.disabled = false;
                 downloadSelectedBtn.innerHTML = origHtml;
             }
         });
 
-        // Modal Lightbox
-        function openModal(src, title) {
-            document.getElementById('modalImg').src = src;
-            document.getElementById('modalTitle').textContent = title;
-            document.getElementById('previewModal').classList.add('open');
+        // Modal Lightbox + crop editor
+        let modalWord = null;
+        const $m = (id) => document.getElementById(id);
+        const modalTitleFor = (w) => `${w.label} (${w.w}×${w.h} px)`;
+
+        function openModal(id) {
+            modalWord = wordsData.find(w => w.id === id);
+            if (!modalWord) return;
+            endEdit();
+            $m('modalImg').src = modalWord.file + '?v=' + (modalWord.v || 0);
+            $m('modalTitle').textContent = modalTitleFor(modalWord);
+            $m('previewModal').classList.add('open');
         }
 
         function closeModal() {
-            document.getElementById('previewModal').classList.remove('open');
+            endEdit();
+            $m('previewModal').classList.remove('open');
         }
+
+        const ed = { rect: null, orig: null, region: null, k: 1, s: 1, img: null, page: null };
+
+        function startEdit() {
+            const w = modalWord;
+            if (!w || !w.crop) return;
+            const pg = pagesData.find(p => p.no === w.page);
+            const img = document.querySelector('#page-' + w.page + ' img');
+            if (!pg || !img || !img.naturalWidth) return;
+            ed.img = img; ed.page = pg; ed.s = img.naturalWidth / pg.w;
+            ed.orig = { x: w.crop.x, y: w.crop.y, w: w.w, h: w.h };
+            ed.rect = { ...ed.orig };
+            // show the crop with some surrounding page so it can be grown as well as shrunk
+            const m = Math.max(40, Math.round(Math.max(w.w, w.h) * 0.6));
+            const rx = Math.max(0, w.crop.x - m), ry = Math.max(0, w.crop.y - m);
+            ed.region = {
+                x: rx, y: ry,
+                w: Math.min(pg.w, w.crop.x + w.w + m) - rx,
+                h: Math.min(pg.h, w.crop.y + w.h + m) - ry
+            };
+            ed.k = Math.min(720 / ed.region.w, 380 / ed.region.h, 6);
+            const cv = $m('ceCanvas');
+            cv.width = Math.round(ed.region.w * ed.k);
+            cv.height = Math.round(ed.region.h * ed.k);
+            cv.getContext('2d').drawImage(img, ed.region.x * ed.s, ed.region.y * ed.s, ed.region.w * ed.s, ed.region.h * ed.s,
+                                          0, 0, cv.width, cv.height);
+            $m('modalImg').style.display = 'none';
+            $m('cropEditor').style.display = 'block';
+            $m('adjustBtn').style.display = 'none';
+            drawRect();
+        }
+
+        function endEdit() {
+            $m('cropEditor').style.display = 'none';
+            $m('modalImg').style.display = '';
+            $m('adjustBtn').style.display = '';
+            ed.rect = null;
+        }
+
+        function drawRect() {
+            const r = ed.rect, el = $m('ceRect');
+            el.style.left = (r.x - ed.region.x) * ed.k + 'px';
+            el.style.top = (r.y - ed.region.y) * ed.k + 'px';
+            el.style.width = r.w * ed.k + 'px';
+            el.style.height = r.h * ed.k + 'px';
+            $m('ceInfo').textContent = `${Math.round(r.w)}×${Math.round(r.h)} px` +
+                (ed.s < 1 ? ' · page preview is downscaled, so the new crop has a lower resolution' : '');
+        }
+
+        // drag to move / resize
+        $m('ceRect').addEventListener('pointerdown', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const handle = e.target.dataset.h || 'move';
+            const start = { px: e.clientX, py: e.clientY, ...ed.rect };
+            const R = ed.region, MIN = 4;
+            const move = (ev) => {
+                const dx = (ev.clientX - start.px) / ed.k, dy = (ev.clientY - start.py) / ed.k;
+                let x0 = start.x, y0 = start.y, x1 = start.x + start.w, y1 = start.y + start.h;
+                if (handle === 'move') {
+                    x0 = Math.min(Math.max(start.x + dx, R.x), R.x + R.w - start.w);
+                    y0 = Math.min(Math.max(start.y + dy, R.y), R.y + R.h - start.h);
+                    x1 = x0 + start.w; y1 = y0 + start.h;
+                } else {
+                    if (handle.includes('w')) x0 = Math.min(Math.max(start.x + dx, R.x), x1 - MIN);
+                    if (handle.includes('e')) x1 = Math.max(Math.min(x1 + dx, R.x + R.w), x0 + MIN);
+                    if (handle.includes('n')) y0 = Math.min(Math.max(start.y + dy, R.y), y1 - MIN);
+                    if (handle.includes('s')) y1 = Math.max(Math.min(y1 + dy, R.y + R.h), y0 + MIN);
+                }
+                ed.rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+                drawRect();
+            };
+            const up = () => {
+                window.removeEventListener('pointermove', move);
+                window.removeEventListener('pointerup', up);
+            };
+            window.addEventListener('pointermove', move);
+            window.addEventListener('pointerup', up);
+        });
+
+        $m('adjustBtn').addEventListener('click', startEdit);
+        $m('ceCancel').addEventListener('click', endEdit);
+        $m('ceReset').addEventListener('click', () => { ed.rect = { ...ed.orig }; drawRect(); });
+
+        $m('ceApply').addEventListener('click', async () => {
+            const w = modalWord, r = ed.rect, btn = $m('ceApply');
+            if (!await askConfirm({ title: 'Apply this crop?', message: `The picture of ${w.label} is replaced by the new crop.`, confirmText: 'Apply' })) return;
+            const ow = Math.max(1, Math.round(r.w * ed.s)), oh = Math.max(1, Math.round(r.h * ed.s));
+            const out = document.createElement('canvas');
+            out.width = ow; out.height = oh;
+            out.getContext('2d').drawImage(ed.img, r.x * ed.s, r.y * ed.s, r.w * ed.s, r.h * ed.s, 0, 0, ow, oh);
+            btn.disabled = true;
+            try {
+                const blob = await new Promise(res => out.toBlob(res, 'image/png'));
+                const fd = new FormData();
+                fd.append('action', 'replace_crop');
+                fd.append('filename', w.filename);
+                fd.append('image', blob, 'crop.png');
+                const res = await fetch('process.php', { method: 'POST', body: fd });
+                const data = await res.json();
+                if (!data.success) throw new Error(data.error || 'save failed');
+
+                // update the data model, the card and the box drawn on the page
+                w.w = data.w; w.h = data.h;
+                w.crop = { x: Math.round(r.x), y: Math.round(r.y) };
+                w.box = { x: w.crop.x, y: w.crop.y, w: Math.round(r.w), h: Math.round(r.h) };
+                w.v = Date.now();
+                $m('thumb-' + w.id).src = w.file + '?v=' + w.v;
+                $m('dim-' + w.id).textContent = `${w.w}×${w.h}`;
+                const pg = ed.page, bb = $m('bbox-' + w.id);
+                bb.style.left = w.box.x / pg.w * 100 + '%';
+                bb.style.top = w.box.y / pg.h * 100 + '%';
+                bb.style.width = w.box.w / pg.w * 100 + '%';
+                bb.style.height = w.box.h / pg.h * 100 + '%';
+                $m('modalImg').src = w.file + '?v=' + w.v;
+                $m('modalTitle').textContent = modalTitleFor(w);
+                endEdit();
+                toast(`Crop of ${w.label} updated (${w.w}×${w.h} px). Press Save to put it in output/.`, 'ok');
+            } catch (err) {
+                toast('Could not adjust the crop: ' + err.message, 'err');
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
     </script>
 </body>
 </html>
