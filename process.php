@@ -915,7 +915,7 @@ function renderError(string $msg): never
                                 <span class="dim-badge" id="dim-<?= $w['id'] ?>"><?= $w['w'] ?>×<?= $w['h'] ?></span>
                             </div>
 
-                            <div class="crop-preview-wrap" onclick="event.stopPropagation(); openModal(<?= $w['id'] ?>)">
+                            <div class="crop-preview-wrap" title="Click to adjust the crop" style="cursor:pointer" onclick="event.stopPropagation(); openModal(<?= $w['id'] ?>, true)">
                                 <img id="thumb-<?= $w['id'] ?>" src="<?= htmlspecialchars($w['file']) ?>" alt="<?= htmlspecialchars($w['label']) ?>" loading="lazy">
                             </div>
 
@@ -1218,13 +1218,14 @@ function renderError(string $msg): never
         const $m = (id) => document.getElementById(id);
         const modalTitleFor = (w) => `${w.label} (${w.w}×${w.h} px)`;
 
-        function openModal(id) {
+        function openModal(id, edit = false) {
             modalWord = wordsData.find(w => w.id === id);
             if (!modalWord) return;
             endEdit();
             $m('modalImg').src = modalWord.file + '?v=' + (modalWord.v || 0);
             $m('modalTitle').textContent = modalTitleFor(modalWord);
             $m('previewModal').classList.add('open');
+            if (edit) startEdit();   // clicking the picture goes straight into the crop editor
         }
 
         function closeModal() {

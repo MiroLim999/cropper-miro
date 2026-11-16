@@ -12,89 +12,22 @@ if (!is_dir($htrImageDir))
     mkdir($htrImageDir, 0777, true);
 
 /**
- * Normalizes a single saved word-crop so it's ready to feed into an HTR
- * model: grayscale, auto-trimmed to its ink bounding box, contrast-stretched,
- * then resized to a fixed height (preserving aspect ratio) with a small
- * clean margin — the standard input shape used by CRNN/Transformer HTR
- * architectures (e.g. IAM-style word strips).
+ * Returns the saved word-crop UNCHANGED (original pixels): no grayscale, no
+ * trimming, no contrast change, no resizing, no margin. It is only copied into a
+ * lossless truecolor image so it can be written out as PNG.
  */
-function prepareImageForHTR(\GdImage $src, int $targetHeight = 64, int $margin = 6): ?\GdImage
+function prepareImageForHTR(\GdImage $src, int $targetHeight = 0, int $margin = 0): ?\GdImage
 {
-    imagefilter($src, IMG_FILTER_GRAYSCALE);
-
     $w = imagesx($src);
     $h = imagesy($src);
     if ($w < 2 || $h < 2) {
         return null;
     }
-
-    // Auto-trim: find the bounding box of "ink" pixels (darker than threshold)
-    $threshold = 200; // 0-255; pixels darker than this count as ink
-    $minX = $w;
-    $minY = $h;
-    $maxX = 0;
-    $maxY = 0;
-    $found = false;
-
-    for ($y = 0; $y < $h; $y++) {
-        for ($x = 0; $x < $w; $x++) {
-            $gray = imagecolorat($src, $x, $y) & 0xFF; // R=G=B after grayscale filter
-            if ($gray < $threshold) {
-                $found = true;
-                if ($x < $minX)
-                    $minX = $x;
-                if ($x > $maxX)
-                    $maxX = $x;
-                if ($y < $minY)
-                    $minY = $y;
-                if ($y > $maxY)
-                    $maxY = $y;
-            }
-        }
-    }
-
-    if (!$found) {
-        $minX = 0;
-        $minY = 0;
-        $maxX = $w - 1;
-        $maxY = $h - 1;
-    }
-
-    $cropW = $maxX - $minX + 1;
-    $cropH = $maxY - $minY + 1;
-
-    $trimmed = imagecreatetruecolor($cropW, $cropH);
-    $white = imagecolorallocate($trimmed, 255, 255, 255);
-    imagefill($trimmed, 0, 0, $white);
-    imagecopy($trimmed, $src, 0, 0, $minX, $minY, $cropW, $cropH);
-
-    // Stretch contrast so ink reads darker and background reads brighter,
-    // which keeps crops from many different scans/lighting consistent.
-    imagefilter($trimmed, IMG_FILTER_CONTRAST, -20);
-
-    // Resize to a fixed height, preserving aspect ratio (variable width is
-    // expected/required by sequence-based HTR models).
-    $scale = $targetHeight / $cropH;
-    $newW = max(1, (int) round($cropW * $scale));
-    $newH = $targetHeight;
-
-    $resized = imagecreatetruecolor($newW, $newH);
-    $whiteR = imagecolorallocate($resized, 255, 255, 255);
-    imagefill($resized, 0, 0, $whiteR);
-    imagecopyresampled($resized, $trimmed, 0, 0, 0, 0, $newW, $newH, $cropW, $cropH);
-    imagedestroy($trimmed);
-
-    // Small white margin on every side (standard practice for CTC/CRNN HTR
-    // inputs, avoids clipping ascenders/descenders at the image edge).
-    $finalW = $newW + $margin * 2;
-    $finalH = $newH + $margin * 2;
-    $final = imagecreatetruecolor($finalW, $finalH);
-    $whiteF = imagecolorallocate($final, 255, 255, 255);
-    imagefill($final, 0, 0, $whiteF);
-    imagecopy($final, $resized, $margin, $margin, 0, 0, $newW, $newH);
-    imagedestroy($resized);
-
-    return $final;
+    $out = imagecreatetruecolor($w, $h);
+    imagealphablending($out, false);
+    imagesavealpha($out, true);
+    imagecopy($out, $src, 0, 0, 0, 0, $w, $h);
+    return $out;
 }
 
 /** manifest.json = the annotation state of the dataset (one entry per image). */
@@ -248,8 +181,8 @@ function batchProcessForHTR(string $outputDir, string $htrImageDir, string $htrE
     // images whose source left output/: keep them only if they already carry work
     foreach ($old as $orig => $r) {
         if (isset($seen[$orig])) continue;
-        if ($r['status'] !== 'pending' && is_file($htrImageDir . $r['processed_filename'])) {
-            $manifest[] = $r;
+        if (($r['status'] !== 'pending' || ($r['source'] ?? '') === 'upload') && is_file($htrImageDir . $r['processed_filename'])) {
+            $manifest[] = $r;   // labelled work, or an image that was uploaded (it has no source in output/)
         } elseif (is_file($htrImageDir . $r['processed_filename'])) {
             @unlink($htrImageDir . $r['processed_filename']);
         }

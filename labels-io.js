@@ -58,7 +58,50 @@
         input.click();
     }
 
+    // download the images that still have no label (+ a template to annotate them elsewhere)
+    async function downloadPending(onMsg) {
+        onMsg('Packing the not-annotated images…', true);
+        const j = await call(form({ action: 'build_pending_zip' }));
+        const a = document.createElement('a');
+        a.href = j.file + '?v=' + Date.now(); a.download = 'not_annotated.zip';
+        document.body.appendChild(a); a.click(); a.remove();
+        onMsg(`✓ ${j.count} not-annotated image(s) downloaded (${(j.size / 1048576).toFixed(2)} MB) with labels_template.csv / .xlsx.`, true);
+        return j;
+    }
+
+    // upload images that were not annotated: they are added to the dataset as "to label"
+    function pickAndUploadImages(o) {
+        const input = document.createElement('input');
+        input.type = 'file'; input.multiple = true;
+        input.accept = 'image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp,.zip';
+        input.onchange = async () => {
+            const list = Array.from(input.files || []);
+            if (!list.length) return;
+            if (!await askConfirm({ title: `Add ${list.length} file(s) to annotate?`,
+                message: 'The pictures are added to the dataset as "to label" (original pixels, unchanged). A .zip of images is unpacked.', confirmText: 'Upload' })) return;
+            const tot = { added: 0, duplicate: 0, invalid: 0 };
+            try {
+                const CH = 15;
+                for (let i = 0; i < list.length; i += CH) {
+                    o.onMsg(`Uploading ${Math.min(i + CH, list.length)} / ${list.length}…`, true);
+                    const fd = new FormData(); fd.append('action', 'upload_images');
+                    list.slice(i, i + CH).forEach(f => fd.append('files[]', f, f.name));
+                    const j = await call(fd);
+                    tot.added += j.added; tot.duplicate += j.duplicate; tot.invalid += j.invalid;
+                }
+                const p = [`${tot.added} image(s) added to annotate`];
+                if (tot.duplicate) p.push(`${tot.duplicate} already in the dataset`);
+                if (tot.invalid) p.push(`${tot.invalid} not readable / not an image`);
+                o.onMsg('✓ ' + p.join(' · '), true);
+                if (tot.added > 0 && o.onDone) o.onDone(tot);
+            } catch (err) { o.onMsg('Upload failed: ' + err.message, false); }
+        };
+        input.click();
+    }
+
     window.LabelsIO = {
+        downloadPending,
+        pickAndUploadImages,
         pickAndImport,
         // index.php wiring
         // build and download the training zip (index.php)
@@ -96,6 +139,17 @@
             run(c.download[0], 'htr_dataset/annotated_labels.xlsx', 'annotated_labels.xlsx');
             run(c.download[1], 'htr_dataset/labels.csv', 'labels.csv');
             $(c.importBtn).addEventListener('click', () => pickAndImport({ onMsg: msg, onMerged: c.onMerged }));
+        },
+
+        // "images to annotate": download the unlabelled ones / upload new ones
+        wirePending(c) {
+            const $ = (id) => document.getElementById(id);
+            const msg = (t, ok) => { const el = $(c.msg); el.textContent = t; el.className = 'kc-io-msg ' + (ok ? 'ok' : 'err'); };
+            $(c.download).addEventListener('click', async () => {
+                if (!await askConfirm({ title: 'Download the not-annotated images?', message: 'A .zip with every image that still has no label, plus a labels template to fill in.', confirmText: 'Download' })) return;
+                try { await downloadPending(msg); } catch (err) { msg(err.message, false); }
+            });
+            $(c.upload).addEventListener('click', () => pickAndUploadImages({ onMsg: msg, onDone: c.onDone }));
         }
     };
 })();

@@ -107,8 +107,11 @@ $maxFiles = (int) ini_get('max_file_uploads');
 
         .modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.9); z-index:50; align-items:center; justify-content:center; padding:24px; }
         .modal.open { display:flex; }
-        .modal img { max-width:90vw; max-height:80vh; background:#000; border-radius:8px; }
-        .modal .cap { color:var(--muted); text-align:center; margin-top:10px; font-size:.85rem; }
+        .modal .mbox { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:18px; max-width:92vw; max-height:90vh; overflow:auto; display:flex; flex-direction:column; gap:12px; }
+        .modal .mhead { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+        .modal #modalImg { max-width:100%; max-height:65vh; object-fit:contain; background:#000; border-radius:8px; align-self:center; }
+        .modal .ce-hint, .modal .ce-bar { color:var(--muted); }
+        .modal .ce-stage { background:#000; border-color:var(--border); }
     </style>
     <link rel="stylesheet" href="sneat.css">
     <script src="confirm.js"></script>
@@ -192,7 +195,36 @@ $maxFiles = (int) ini_get('max_file_uploads');
         </div>
     </section>
 
-    <div class="modal" id="modal"><div><img id="modalImg" alt=""><div class="cap" id="modalCap"></div></div></div>
+    <div class="modal" id="modal">
+        <div class="mbox" id="mbox">
+            <div class="mhead">
+                <b id="modalCap" style="font-size:.9rem"></b>
+                <span style="display:flex;gap:8px;align-items:center">
+                    <button type="button" class="btn" id="adjustBtn">✂ Adjust crop</button>
+                    <button type="button" class="btn" id="modalClose">×</button>
+                </span>
+            </div>
+            <img id="modalImg" alt="">
+            <div id="cropEditor" style="display:none">
+                <div class="ce-hint">Drag the box to move it, drag a handle to resize. The picture is re-cut from the page.</div>
+                <div class="ce-stage" id="ceStage">
+                    <canvas id="ceCanvas"></canvas>
+                    <div class="ce-rect" id="ceRect">
+                        <i data-h="nw"></i><i data-h="n"></i><i data-h="ne"></i><i data-h="e"></i>
+                        <i data-h="se"></i><i data-h="s"></i><i data-h="sw"></i><i data-h="w"></i>
+                    </div>
+                </div>
+                <div class="ce-bar">
+                    <span id="ceInfo"></span>
+                    <span style="display:flex;gap:8px">
+                        <button type="button" class="btn" id="ceReset">Reset</button>
+                        <button type="button" class="btn" id="ceCancel">Cancel</button>
+                        <button type="button" class="btn" id="ceApply" style="background:#4ade80;color:#052e16;border-color:#4ade80">✓ Apply</button>
+                    </span>
+                </div>
+            </div>
+        </div>
+    </div>
 
 <script>
 (() => {
@@ -353,9 +385,9 @@ $maxFiles = (int) ini_get('max_file_uploads');
             <div class="wcard${d.sel.has(w.id) ? ' sel' : ''}" id="wc-${w.id}" data-id="${w.id}">
                 <div class="top"><label style="display:flex;gap:6px;align-items:center" onclick="event.stopPropagation()">
                     <input type="checkbox" class="chk" data-id="${w.id}"${d.sel.has(w.id) ? ' checked' : ''}><span>${esc(w.label)}</span></label>
-                    <span class="dim">${w.w}×${w.h}</span></div>
-                <div class="thumb"><img src="${esc(w.file)}" alt="${esc(w.label)}" loading="lazy"></div>
-                <div style="text-align:right"><button class="btn" style="padding:3px 8px;font-size:.72rem" data-zoom="${w.id}">🔍 Zoom</button></div>
+                    <span class="dim" id="dim-${w.id}">${w.w}×${w.h}</span></div>
+                <div class="thumb"><img id="th-${w.id}" src="${esc(w.file)}?v=${w.v || 0}" alt="${esc(w.label)}" loading="lazy"></div>
+                <div style="text-align:right;display:flex;gap:6px;justify-content:flex-end"><button class="btn" style="padding:3px 8px;font-size:.72rem" data-edit="${w.id}">✂ Adjust</button><button class="btn" style="padding:3px 8px;font-size:.72rem" data-zoom="${w.id}">🔍 Zoom</button></div>
             </div>`).join('');
 
         const toggle = (id) => { d.sel.has(id) ? d.sel.delete(id) : d.sel.add(id); sync(d); };
@@ -364,12 +396,15 @@ $maxFiles = (int) ini_get('max_file_uploads');
             c.onmouseenter = () => { const b = $('bb-' + c.dataset.id); b && b.classList.add('hl'); };
             c.onmouseleave = () => { const b = $('bb-' + c.dataset.id); b && b.classList.remove('hl'); };
         });
-        $('grid').querySelectorAll('[data-zoom]').forEach(b => b.onclick = (e) => {
-            e.stopPropagation();
-            const w = r.words.find(x => x.id === +b.dataset.zoom);
-            $('modalImg').src = w.file; $('modalCap').textContent = w.label + ' (' + w.w + '×' + w.h + ' px)';
-            $('modal').classList.add('open');
+        // the tick box itself: it used to look ticked without changing the selection
+        $('grid').querySelectorAll('.chk').forEach(k => k.onchange = () => {
+            const id = +k.dataset.id; k.checked ? d.sel.add(id) : d.sel.delete(id); sync(d);
         });
+        // clicking the cropped picture itself opens the viewer, where the crop can be adjusted
+        $('grid').querySelectorAll('.thumb').forEach(t => { t.style.cursor = 'zoom-in'; t.title = 'Click to adjust the crop';
+            t.onclick = (e) => { e.stopPropagation(); openModal(+t.closest('.wcard').dataset.id, true); }; });
+        $('grid').querySelectorAll('[data-zoom]').forEach(b => b.onclick = (e) => { e.stopPropagation(); openModal(+b.dataset.zoom, false); });
+        $('grid').querySelectorAll('[data-edit]').forEach(b => b.onclick = (e) => { e.stopPropagation(); openModal(+b.dataset.edit, true); });
         $('viewport').querySelectorAll('.bbox').forEach(b => {
             b.onclick = () => {
                 const id = +b.dataset.id; toggle(id);
@@ -395,7 +430,120 @@ $maxFiles = (int) ini_get('max_file_uploads');
     }
     $('selAll').onclick = () => { const d = docs[cur]; d.res.words.forEach(w => d.sel.add(w.id)); sync(d); };
     $('selNone').onclick = () => { const d = docs[cur]; d.sel.clear(); sync(d); };
-    $('modal').onclick = () => $('modal').classList.remove('open');
+
+    /* ───────── view + adjust an already cropped image ───────── */
+    let modalWord = null;
+    const modalTitleFor = (w) => `${w.label} (${w.w}×${w.h} px)`;
+    const ed = { rect: null, orig: null, region: null, k: 1, s: 1, img: null, page: null };
+
+    function openModal(id, edit) {
+        const d = docs[cur]; if (!d || !d.res || !d.res.words) return;
+        modalWord = d.res.words.find(x => x.id === id);
+        if (!modalWord) return;
+        endEdit();
+        $('modalImg').src = modalWord.file + '?v=' + (modalWord.v || 0);
+        $('modalCap').textContent = modalTitleFor(modalWord);
+        $('modal').classList.add('open');
+        if (edit) startEdit();
+    }
+    function closeModal() { endEdit(); $('modal').classList.remove('open'); }
+
+    function startEdit() {
+        const w = modalWord, d = docs[cur];
+        if (!w || !w.crop || !d) return;
+        const pg = d.res.pages.find(p => p.no === w.page);
+        const img = document.querySelector('#pg-' + w.page + ' img');
+        if (!pg || !img || !img.naturalWidth) return;
+        ed.img = img; ed.page = pg; ed.s = img.naturalWidth / pg.w;
+        ed.orig = { x: w.crop.x, y: w.crop.y, w: w.w, h: w.h };
+        ed.rect = { ...ed.orig };
+        const m = Math.max(40, Math.round(Math.max(w.w, w.h) * 0.6));
+        const rx = Math.max(0, w.crop.x - m), ry = Math.max(0, w.crop.y - m);
+        ed.region = { x: rx, y: ry, w: Math.min(pg.w, w.crop.x + w.w + m) - rx, h: Math.min(pg.h, w.crop.y + w.h + m) - ry };
+        ed.k = Math.min(720 / ed.region.w, 380 / ed.region.h, 6);
+        const cv = $('ceCanvas');
+        cv.width = Math.round(ed.region.w * ed.k); cv.height = Math.round(ed.region.h * ed.k);
+        cv.getContext('2d').drawImage(img, ed.region.x * ed.s, ed.region.y * ed.s, ed.region.w * ed.s, ed.region.h * ed.s, 0, 0, cv.width, cv.height);
+        $('modalImg').style.display = 'none';
+        $('cropEditor').style.display = 'block';
+        $('adjustBtn').style.display = 'none';
+        drawRect();
+    }
+    function endEdit() {
+        $('cropEditor').style.display = 'none';
+        $('modalImg').style.display = '';
+        $('adjustBtn').style.display = '';
+        ed.rect = null;
+    }
+    function drawRect() {
+        const r = ed.rect, el = $('ceRect');
+        el.style.left = (r.x - ed.region.x) * ed.k + 'px';
+        el.style.top = (r.y - ed.region.y) * ed.k + 'px';
+        el.style.width = r.w * ed.k + 'px';
+        el.style.height = r.h * ed.k + 'px';
+        $('ceInfo').textContent = `${Math.round(r.w)}×${Math.round(r.h)} px` + (ed.s < 1 ? ' · page preview is downscaled, so the new crop has a lower resolution' : '');
+    }
+    $('ceRect').addEventListener('pointerdown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const handle = e.target.dataset.h || 'move';
+        const start = { px: e.clientX, py: e.clientY, ...ed.rect };
+        const R = ed.region, MIN = 4;
+        const move = (ev) => {
+            const dx = (ev.clientX - start.px) / ed.k, dy = (ev.clientY - start.py) / ed.k;
+            let x0 = start.x, y0 = start.y, x1 = start.x + start.w, y1 = start.y + start.h;
+            if (handle === 'move') {
+                x0 = Math.min(Math.max(start.x + dx, R.x), R.x + R.w - start.w);
+                y0 = Math.min(Math.max(start.y + dy, R.y), R.y + R.h - start.h);
+                x1 = x0 + start.w; y1 = y0 + start.h;
+            } else {
+                if (handle.includes('w')) x0 = Math.min(Math.max(start.x + dx, R.x), x1 - MIN);
+                if (handle.includes('e')) x1 = Math.max(Math.min(x1 + dx, R.x + R.w), x0 + MIN);
+                if (handle.includes('n')) y0 = Math.min(Math.max(start.y + dy, R.y), y1 - MIN);
+                if (handle.includes('s')) y1 = Math.max(Math.min(y1 + dy, R.y + R.h), y0 + MIN);
+            }
+            ed.rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+            drawRect();
+        };
+        const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+        window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+    });
+    $('adjustBtn').onclick = startEdit;
+    $('ceCancel').onclick = endEdit;
+    $('ceReset').onclick = () => { ed.rect = { ...ed.orig }; drawRect(); };
+    $('ceApply').onclick = async () => {
+        const w = modalWord, r = ed.rect, btn = $('ceApply');
+        if (!w || !r) return;
+        if (!await askConfirm({ title: 'Apply this crop?', message: `The picture of ${w.label} is replaced by the new crop.`, confirmText: 'Apply' })) return;
+        const ow = Math.max(1, Math.round(r.w * ed.s)), oh = Math.max(1, Math.round(r.h * ed.s));
+        const out = document.createElement('canvas'); out.width = ow; out.height = oh;
+        out.getContext('2d').drawImage(ed.img, r.x * ed.s, r.y * ed.s, r.w * ed.s, r.h * ed.s, 0, 0, ow, oh);
+        btn.disabled = true;
+        try {
+            const blob = await new Promise(res => out.toBlob(res, 'image/png'));
+            const fd = new FormData();
+            fd.append('action', 'replace_crop'); fd.append('prefix', docs[cur].res.prefix);
+            fd.append('filename', w.filename); fd.append('image', blob, 'crop.png');
+            const res = await fetch(API, { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.ok) throw new Error(data.error || 'save failed');
+            w.w = data.w; w.h = data.h;
+            w.crop = { x: Math.round(r.x), y: Math.round(r.y) };
+            w.box = { x: w.crop.x, y: w.crop.y, w: Math.round(r.w), h: Math.round(r.h) };
+            w.v = Date.now();
+            const th = $('th-' + w.id); if (th) th.src = w.file + '?v=' + w.v;
+            const dm = $('dim-' + w.id); if (dm) dm.textContent = `${w.w}×${w.h}`;
+            const pg = ed.page, bb = $('bb-' + w.id);
+            if (bb) { bb.style.left = w.box.x / pg.w * 100 + '%'; bb.style.top = w.box.y / pg.h * 100 + '%'; bb.style.width = w.box.w / pg.w * 100 + '%'; bb.style.height = w.box.h / pg.h * 100 + '%'; }
+            $('modalImg').src = w.file + '?v=' + w.v;
+            $('modalCap').textContent = modalTitleFor(w);
+            endEdit();
+        } catch (err) {
+            alert('Could not adjust the crop: ' + err.message);
+        } finally { btn.disabled = false; }
+    };
+    $('modal').onclick = (e) => { if (e.target === $('modal')) closeModal(); };
+    $('modalClose').onclick = closeModal;
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
     /* ───────── save / skip / navigate ───────── */
     async function post(data) {

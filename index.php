@@ -373,8 +373,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
         }
     </style>
     <link rel="stylesheet" href="sneat.css">
-    <script src="confirm.js"></script>
-    <script src="labels-io.js"></script>
+    <script src="confirm.js?v=<?= @filemtime(__DIR__ . '/confirm.js') ?>"></script>
+    <script src="labels-io.js?v=<?= @filemtime(__DIR__ . '/labels-io.js') ?>"></script>
 </head>
 
 <body>
@@ -450,7 +450,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
             <div>
                 <div class="kc-drop-title" style="margin-bottom:4px;">Prepare HTR Training Dataset</div>
                 <div class="kc-drop-sub">Batch-processes every image saved in <code>output/</code> into
-                    model-ready crops (grayscale, trimmed, height-normalized) and exports an Excel manifest
+                    model-ready crops (original pixels, unmodified) and exports an Excel manifest
                     (<code>htr_dataset/dataset_labels.xlsx</code>). Then open the annotation tool to type the word of each image.</div>
             </div>
             <button type="button" class="kc-submit" id="htrSubmit">
@@ -466,6 +466,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
                 </div>
                 <div class="kc-drop-sub" style="margin-top:8px;">Import an .xlsx, .csv, .tsv or manifest .json that was annotated elsewhere: its labels are merged into this dataset by image file name.</div>
                 <div id="ioMsg" class="kc-io-msg"></div>
+            </div>
+            <div class="kc-io">
+                <div class="kc-io-title">Images to annotate (not annotated yet)</div>
+                <div class="kc-result-btns" style="margin-top:8px;">
+                    <button type="button" class="kc-btn" id="dlPending">⬇ Download not-annotated images (.zip)</button>
+                    <button type="button" class="kc-btn" id="upPending">⬆ Upload images to annotate</button>
+                </div>
+                <div class="kc-drop-sub" style="margin-top:8px;">The .zip holds every image that still has no label plus a <code>labels_template</code> to fill in; import it back with "Import annotated file". Upload PNG / JPG / WEBP pictures (or a .zip of them) that were cropped elsewhere to add them to the annotation tool, with their pixels unchanged.</div>
+                <div id="pendMsg" class="kc-io-msg"></div>
             </div>
             <div class="kc-io">
                 <div class="kc-io-title">Training dataset (.zip)</div>
@@ -540,6 +549,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
                 download: ['dlLabels', 'dlCsv'], importBtn: 'impLabels', msg: 'ioMsg',
                 onMerged: () => {}
             });
+            LabelsIO.wirePending({ download: 'dlPending', upload: 'upPending', msg: 'pendMsg' });
 
             $('kcRemove').addEventListener('click', () => {
                 file.value = '';

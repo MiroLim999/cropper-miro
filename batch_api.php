@@ -101,6 +101,30 @@ if ($action === 'save') {
     out(['ok' => true, 'count' => count($saved), 'files' => $saved]);
 }
 
+if ($action === 'replace_crop') {
+    // overwrite ONE crop of this document with a hand-adjusted version
+    $prefix = (string) ($_POST['prefix'] ?? '');
+    if (!validPrefix($prefix)) out(['ok' => false, 'error' => 'bad prefix'], 400);
+    $name = basename((string) ($_POST['filename'] ?? ''));
+    $ext  = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+    $dst  = $previewDir . $name;
+    $up   = $_FILES['image'] ?? null;
+    if (strncmp($name, $prefix, strlen($prefix)) !== 0 || !is_file($dst) || !in_array($ext, ['png', 'jpeg', 'webp'], true)
+        || !$up || $up['error'] !== UPLOAD_ERR_OK || $up['size'] > 20 * 1024 * 1024) {
+        out(['ok' => false, 'error' => 'Bad crop upload'], 400);
+    }
+    $img = @imagecreatefromstring((string) file_get_contents($up['tmp_name']));
+    if (!$img) out(['ok' => false, 'error' => 'Not a readable image'], 400);
+    switch ($ext) {
+        case 'jpeg': imagejpeg($img, $dst, 95); break;
+        case 'webp': imagewebp($img, $dst, 95); break;
+        default:     imagepng($img, $dst);      break;
+    }
+    $w = imagesx($img); $h = imagesy($img);
+    imagedestroy($img);
+    out(['ok' => true, 'w' => $w, 'h' => $h]);
+}
+
 if ($action === 'discard') {
     $prefix = (string) ($_POST['prefix'] ?? '');
     if (!validPrefix($prefix)) out(['ok' => false, 'error' => 'bad prefix'], 400);

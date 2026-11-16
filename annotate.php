@@ -63,13 +63,15 @@
         #links a { color:#fff; font-weight:700; margin-right:14px; font-size:.82rem; }
     </style>
     <link rel="stylesheet" href="sneat.css">
-    <script src="confirm.js"></script>
-    <script src="labels-io.js"></script>
+    <script src="confirm.js?v=<?= @filemtime(__DIR__ . '/confirm.js') ?>"></script>
+    <script src="labels-io.js?v=<?= @filemtime(__DIR__ . '/labels-io.js') ?>"></script>
 </head>
 <body>
     <header class="navbar">
         <div class="brand"><span>Word Cropper</span><span class="pill">Annotate</span></div>
         <div style="display:flex;gap:8px">
+            <button class="btn" id="pendDl">⬇ Not annotated</button>
+            <button class="btn" id="pendUp">⬆ Upload to annotate</button>
             <button class="btn" id="impBtn">⬆ Import annotated</button>
             <button class="btn" id="exportBtn">⬇ Export labels</button>
             <a class="btn" href="index.php">← Back</a>
@@ -243,6 +245,13 @@
             $('msg').style.color = 'var(--ok)'; $('msg').textContent = '✓ Exported ' + j.labeled + ' labeled image(s).';
         }
     };
+
+    const amsg = (t, ok) => { $('msg').style.color = ok ? 'var(--ok)' : 'var(--err)'; $('msg').textContent = t; };
+    $('pendDl').onclick = async () => {
+        if (!await askConfirm({ title: 'Download the not-annotated images?', message: 'A .zip with every image that still has no label, plus a labels template to fill in.', confirmText: 'Download' })) return;
+        try { await LabelsIO.downloadPending(amsg); } catch (err) { amsg(err.message, false); }
+    };
+    $('pendUp').onclick = () => LabelsIO.pickAndUploadImages({ onMsg: amsg, onDone: () => setTimeout(() => location.reload(), 1500) });
 
     $('impBtn').onclick = () => LabelsIO.pickAndImport({
         onMsg: (t, ok) => { $('msg').style.color = ok ? 'var(--ok)' : 'var(--err)'; $('msg').textContent = t; },
