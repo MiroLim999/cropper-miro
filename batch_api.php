@@ -23,19 +23,37 @@ function out(array $data, int $code = 200): never
     exit;
 }
 
-/** Safe file-name prefix for one document: "<id>_<relative path>_" */
+/** Safe file-name prefix for one document: "d<id>_<nodeId>_<rel>_"
+ *  The node ID makes prefixes unique per installation so multiple
+ *  laptops can produce crops without filename collisions when merged. */
 function docPrefix(string $id, string $rel): string
 {
+    $nodeId = getNodeId();
     $rel = preg_replace('/\.[^.\/\\\\]+$/', '', $rel);                 // drop extension
     $rel = trim((string) preg_replace('/[^A-Za-z0-9]+/', '-', $rel), '-');
-    $rel = substr($rel, -70);
+    $rel = substr($rel, -60);
     $id  = preg_replace('/[^0-9]/', '', $id);
-    return sprintf('d%s_%s_', str_pad($id === '' ? '0' : $id, 3, '0', STR_PAD_LEFT), $rel === '' ? 'doc' : $rel);
+    return sprintf('d%s_%s_%s_', str_pad($id === '' ? '0' : $id, 3, '0', STR_PAD_LEFT), $nodeId, $rel === '' ? 'doc' : $rel);
+}
+
+/** Returns (and lazily creates) the 6-char hex node ID for this installation. */
+function getNodeId(): string
+{
+    $f = __DIR__ . '/uploads/node_id.txt';
+    if (is_file($f)) {
+        $id = trim((string) file_get_contents($f));
+        if (preg_match('/^[A-Za-z0-9]{4,8}$/', $id)) return $id;
+    }
+    $id = substr(bin2hex(random_bytes(3)), 0, 6);
+    @file_put_contents($f, $id);
+    return $id;
 }
 
 function validPrefix(string $prefix): bool
 {
-    return (bool) preg_match('/^d[0-9]{3,}_[A-Za-z0-9-]*_$/', $prefix);
+    // new format: d003_a1b2c3_rel_   (node-id segment required)
+    // also accept legacy format without node-id so old sessions still save cleanly
+    return (bool) preg_match('/^d[0-9]{3,}_([A-Za-z0-9]{4,8}_)?[A-Za-z0-9-]*_$/', $prefix);
 }
 
 function dropPreviews(string $previewDir, string $prefix): int
@@ -123,6 +141,29 @@ if ($action === 'replace_crop') {
     $w = imagesx($img); $h = imagesy($img);
     imagedestroy($img);
     out(['ok' => true, 'w' => $w, 'h' => $h]);
+}
+
+if ($action === 'add_crop') {
+    $prefix = (string) ($_POST['prefix'] ?? '');
+    if (!validPrefix($prefix)) out(['ok' => false, 'error' => 'bad prefix'], 400);
+    $up = $_FILES['image'] ?? null;
+    if (!$up || $up['error'] !== UPLOAD_ERR_OK || $up['size'] > 20 * 1024 * 1024) {
+        out(['ok' => false, 'error' => 'Bad crop upload'], 400);
+    }
+    $img = @imagecreatefromstring((string) file_get_contents($up['tmp_name']));
+    if (!$img) out(['ok' => false, 'error' => 'Not a readable image'], 400);
+
+    // find a unique filename for this manual crop
+    $i = 1;
+    do {
+        $name = $prefix . 'manual' . $i . '.png';
+        $i++;
+    } while (file_exists($previewDir . $name) && $i < 10000);
+
+    imagepng($img, $previewDir . $name);
+    $w = imagesx($img); $h = imagesy($img);
+    imagedestroy($img);
+    out(['ok' => true, 'filename' => $name, 'file' => 'uploads/previews/' . $name, 'w' => $w, 'h' => $h]);
 }
 
 if ($action === 'discard') {

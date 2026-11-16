@@ -112,6 +112,14 @@ $maxFiles = (int) ini_get('max_file_uploads');
         .modal #modalImg { max-width:100%; max-height:65vh; object-fit:contain; background:#000; border-radius:8px; align-self:center; }
         .modal .ce-hint, .modal .ce-bar { color:var(--muted); }
         .modal .ce-stage { background:#000; border-color:var(--border); }
+
+        /* ── manual crop ── */
+        #manualBtn.active { background:#fbbf24; color:#000; border-color:#fbbf24; font-weight:800; }
+        .manual-overlay { position:absolute; inset:0; cursor:crosshair; z-index:20; border-radius:4px; }
+        .manual-sel { position:absolute; border:2px dashed #fbbf24; background:rgba(251,191,36,.12); pointer-events:none; z-index:21; border-radius:2px; }
+        .bbox.manual.sel { border-color:rgba(251,191,36,.95) !important; background:rgba(251,191,36,.18) !important; }
+        .wcard.manual { border-color:rgba(251,191,36,.5); }
+        .wcard.manual .top span { color:var(--warn); }
     </style>
     <link rel="stylesheet" href="sneat.css">
     <script src="confirm.js"></script>
@@ -178,6 +186,7 @@ $maxFiles = (int) ini_get('max_file_uploads');
                             <div style="display:flex;gap:8px;flex-wrap:wrap">
                                 <button class="btn" id="selAll">Select all</button>
                                 <button class="btn" id="selNone">Deselect all</button>
+                                <button class="btn" id="manualBtn" title="Draw a rectangle on the page to add a missed crop">✏ Add Crop</button>
                             </div>
                         </div>
                         <div class="grid-wrap"><div class="grid" id="grid"></div></div>
@@ -414,6 +423,7 @@ $maxFiles = (int) ini_get('max_file_uploads');
             b.onmouseleave = () => { const c = $('wc-' + b.dataset.id); c && c.classList.remove('hl'); };
         });
         sync(d);
+        if (manualMode) addManualOverlays();
     }
 
     function sync(d) {
@@ -430,6 +440,169 @@ $maxFiles = (int) ini_get('max_file_uploads');
     }
     $('selAll').onclick = () => { const d = docs[cur]; d.res.words.forEach(w => d.sel.add(w.id)); sync(d); };
     $('selNone').onclick = () => { const d = docs[cur]; d.sel.clear(); sync(d); };
+
+    /* ───────── manual crop ───────── */
+    let manualMode = false;
+    let manualCount = 0;
+
+    $('manualBtn').onclick = () => {
+        manualMode = !manualMode;
+        $('manualBtn').classList.toggle('active', manualMode);
+        $('manualBtn').title = manualMode
+            ? 'Manual crop ON — draw a rectangle on the page. Click again to turn off.'
+            : 'Draw a rectangle on the page to add a missed crop';
+        if (manualMode) addManualOverlays();
+        else removeManualOverlays();
+    };
+
+    function addManualOverlays() {
+        document.querySelectorAll('#viewport .page').forEach(pageEl => {
+            if (pageEl.querySelector('.manual-overlay')) return;
+            const ov = document.createElement('div');
+            ov.className = 'manual-overlay';
+            pageEl.appendChild(ov);
+            wireManualDraw(ov, pageEl);
+        });
+    }
+
+    function removeManualOverlays() {
+        document.querySelectorAll('.manual-overlay, .manual-sel').forEach(el => el.remove());
+    }
+
+    function wireManualDraw(ov, pageEl) {
+        let active = false, sx = 0, sy = 0, selEl = null;
+
+        ov.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            ov.setPointerCapture(e.pointerId);
+            active = true;
+            const r = ov.getBoundingClientRect();
+            sx = e.clientX - r.left; sy = e.clientY - r.top;
+            selEl = document.createElement('div');
+            selEl.className = 'manual-sel';
+            selEl.style.cssText = `left:${sx}px;top:${sy}px;width:0;height:0`;
+            pageEl.appendChild(selEl);
+        });
+
+        ov.addEventListener('pointermove', (e) => {
+            if (!active || !selEl) return;
+            const r = ov.getBoundingClientRect();
+            const cx = e.clientX - r.left, cy = e.clientY - r.top;
+            selEl.style.left   = Math.min(sx, cx) + 'px';
+            selEl.style.top    = Math.min(sy, cy) + 'px';
+            selEl.style.width  = Math.abs(cx - sx) + 'px';
+            selEl.style.height = Math.abs(cy - sy) + 'px';
+        });
+
+        ov.addEventListener('pointerup', async (e) => {
+            if (!active) return;
+            active = false;
+            const r = ov.getBoundingClientRect();
+            const cx = e.clientX - r.left, cy = e.clientY - r.top;
+            const dX = Math.min(sx, cx), dY = Math.min(sy, cy);
+            const dW = Math.abs(cx - sx), dH = Math.abs(cy - sy);
+            if (selEl) { selEl.remove(); selEl = null; }
+            if (dW < 5 || dH < 5) return;   // too small — ignore accidental clicks
+
+            const pageNo = parseInt(pageEl.id.replace('pg-', ''), 10);
+            const d = docs[cur];
+            const pg = d && d.res && d.res.pages && d.res.pages.find(p => p.no === pageNo);
+            if (!pg) return;
+
+            // convert display pixels → page coordinates
+            const dispScale = pageEl.clientWidth / pg.w;
+            const pX = Math.max(0, Math.round(dX / dispScale));
+            const pY = Math.max(0, Math.round(dY / dispScale));
+            const pW = Math.max(1, Math.round(dW / dispScale));
+            const pH = Math.max(1, Math.round(dH / dispScale));
+
+            // crop from the page image element via canvas
+            const imgEl = pageEl.querySelector('img');
+            const iScale = imgEl.naturalWidth / pg.w;
+            const cv = document.createElement('canvas');
+            cv.width  = Math.max(1, Math.round(pW * iScale));
+            cv.height = Math.max(1, Math.round(pH * iScale));
+            cv.getContext('2d').drawImage(imgEl, pX * iScale, pY * iScale, pW * iScale, pH * iScale, 0, 0, cv.width, cv.height);
+
+            // show a "saving" indicator while we upload
+            const spinner = document.createElement('div');
+            spinner.className = 'manual-sel';
+            spinner.style.cssText = `left:${dX}px;top:${dY}px;width:${dW}px;height:${dH}px;` +
+                'display:flex;align-items:center;justify-content:center;font-size:.7rem;color:#fbbf24;pointer-events:none';
+            spinner.textContent = 'Saving…';
+            pageEl.appendChild(spinner);
+
+            try {
+                const blob = await new Promise(res => cv.toBlob(res, 'image/png'));
+                const fd = new FormData();
+                fd.append('action', 'add_crop');
+                fd.append('prefix', d.res.prefix);
+                fd.append('page_no', pageNo);
+                fd.append('x', pX); fd.append('y', pY);
+                fd.append('w', pW); fd.append('h', pH);
+                fd.append('image', blob, 'crop.png');
+                const json = await (await fetch(API, { method: 'POST', body: fd })).json();
+                if (!json.ok) throw new Error(json.error || 'Server error');
+
+                manualCount++;
+                const newId = (d.res.words.length ? Math.max(...d.res.words.map(x => x.id)) : 0) + 1;
+                const nw = {
+                    id: newId, label: 'manual-' + manualCount,
+                    file: json.file, filename: json.filename,
+                    page: pageNo, w: json.w, h: json.h,
+                    box: { x: pX, y: pY, w: pW, h: pH },
+                    crop: { x: pX, y: pY }, v: Date.now(), manual: true
+                };
+                d.res.words.push(nw);
+                d.sel.add(newId);
+
+                // add bbox overlay on the page image
+                const overlayEl = pageEl.querySelector('.overlay');
+                if (overlayEl) {
+                    const bb = document.createElement('div');
+                    bb.className = 'bbox sel manual';
+                    bb.id = 'bb-' + newId; bb.dataset.id = newId;
+                    bb.style.cssText = `left:${pX/pg.w*100}%;top:${pY/pg.h*100}%;width:${pW/pg.w*100}%;height:${pH/pg.h*100}%`;
+                    bb.title = nw.label;
+                    overlayEl.appendChild(bb);
+                    bb.onclick = () => { d.sel.has(newId) ? d.sel.delete(newId) : d.sel.add(newId); sync(d); };
+                    bb.onmouseenter = () => { const c = $('wc-' + newId); if (c) c.classList.add('hl'); };
+                    bb.onmouseleave = () => { const c = $('wc-' + newId); if (c) c.classList.remove('hl'); };
+                }
+
+                // add card to the grid
+                const card = document.createElement('div');
+                card.className = 'wcard sel manual'; card.id = 'wc-' + newId; card.dataset.id = newId;
+                card.innerHTML = `
+                    <div class="top">
+                        <label style="display:flex;gap:6px;align-items:center" onclick="event.stopPropagation()">
+                            <input type="checkbox" class="chk" data-id="${newId}" checked>
+                            <span>${esc(nw.label)}</span>
+                        </label>
+                        <span class="dim" id="dim-${newId}">${json.w}×${json.h}</span>
+                    </div>
+                    <div class="thumb" style="cursor:zoom-in" title="Click to adjust the crop">
+                        <img id="th-${newId}" src="${esc(nw.file)}?v=${nw.v}" alt="${esc(nw.label)}" loading="lazy">
+                    </div>
+                    <div style="text-align:right;display:flex;gap:6px;justify-content:flex-end">
+                        <button class="btn" style="padding:3px 8px;font-size:.72rem" data-edit="${newId}">&#x2702; Adjust</button>
+                        <button class="btn" style="padding:3px 8px;font-size:.72rem" data-zoom="${newId}">&#x1F50D; Zoom</button>
+                    </div>`;
+                card.onclick = () => { d.sel.has(newId) ? d.sel.delete(newId) : d.sel.add(newId); sync(d); };
+                card.onmouseenter = () => { const b = $('bb-' + newId); if (b) b.classList.add('hl'); };
+                card.onmouseleave = () => { const b = $('bb-' + newId); if (b) b.classList.remove('hl'); };
+                card.querySelector('.chk').onchange = (ev) => { ev.target.checked ? d.sel.add(newId) : d.sel.delete(newId); sync(d); };
+                card.querySelector('.thumb').onclick = (ev) => { ev.stopPropagation(); openModal(newId, true); };
+                card.querySelector('[data-zoom]').onclick = (ev) => { ev.stopPropagation(); openModal(newId, false); };
+                card.querySelector('[data-edit]').onclick = (ev) => { ev.stopPropagation(); openModal(newId, true); };
+                $('grid').appendChild(card);
+                card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                sync(d);
+            } catch (err) {
+                alert('Could not add crop: ' + err.message);
+            } finally { spinner.remove(); }
+        });
+    }
 
     /* ───────── view + adjust an already cropped image ───────── */
     let modalWord = null;

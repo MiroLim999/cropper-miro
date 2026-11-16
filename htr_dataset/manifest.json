@@ -1,42 +1,32 @@
 [
     {
-        "id": 9,
-        "original_filename": "p1_r07_c01.png",
-        "processed_filename": "htr_0009.png",
-        "relative_path": "htr_dataset\/images\/htr_0009.png",
-        "width": 239,
-        "height": 76,
-        "transcription": "6",
+        "id": 13,
+        "original_filename": "d001_2splitpages_p2_r20_c01.png",
+        "processed_filename": "htr_0013.png",
+        "relative_path": "htr_dataset\/images\/htr_0013.png",
+        "width": 410,
+        "height": 46,
+        "transcription": "Quinitin Q. Quesbeing",
         "status": "labeled"
     },
     {
-        "id": 10,
-        "original_filename": "p1_r07_c02.png",
-        "processed_filename": "htr_0010.png",
-        "relative_path": "htr_dataset\/images\/htr_0010.png",
-        "width": 383,
-        "height": 76,
-        "transcription": "Jan. 09, 1978",
-        "status": "labeled"
+        "id": 14,
+        "original_filename": "d001_2splitpages_p2_r20_c02.png",
+        "processed_filename": "htr_0014.png",
+        "relative_path": "htr_dataset\/images\/htr_0014.png",
+        "width": 179,
+        "height": 37,
+        "transcription": "",
+        "status": "pending"
     },
     {
-        "id": 11,
-        "original_filename": "p1_r07_c03.png",
-        "processed_filename": "htr_0011.png",
-        "relative_path": "htr_dataset\/images\/htr_0011.png",
-        "width": 826,
-        "height": 76,
-        "transcription": "Josefina L. Lim",
-        "status": "labeled"
-    },
-    {
-        "id": 12,
-        "original_filename": "p1_r07_c04.png",
-        "processed_filename": "htr_0012.png",
-        "relative_path": "htr_dataset\/images\/htr_0012.png",
-        "width": 206,
-        "height": 76,
-        "transcription": "f",
-        "status": "labeled"
+        "id": 15,
+        "original_filename": "d001_2splitpages_p2_r20_c03.png",
+        "processed_filename": "htr_0015.png",
+        "relative_path": "htr_dataset\/images\/htr_0015.png",
+        "width": 351,
+        "height": 43,
+        "transcription": "",
+        "status": "pending"
     }
 ]
