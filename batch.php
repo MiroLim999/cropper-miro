@@ -82,7 +82,7 @@ $maxFiles = (int) ini_get('max_file_uploads');
         .pane-title { font-size:.78rem; font-weight:800; text-transform:uppercase; letter-spacing:.6px; }
         .viewer { border-right:1px solid var(--border); background:#020203; display:flex; flex-direction:column; min-height:0; }
         .viewport { flex:1; overflow:auto; padding:22px; display:flex; flex-direction:column; gap:24px; align-items:center; }
-        .page { position:relative; width:100%; margin-top:18px; border-radius:4px; box-shadow:0 10px 40px rgba(0,0,0,.9), 0 0 0 1px var(--border); }
+        .page { position:relative; width:100%; flex:0 0 auto; margin:18px auto 0; border-radius:4px; box-shadow:0 10px 40px rgba(0,0,0,.9), 0 0 0 1px var(--border); }
         .page > .cap { position:absolute; top:-17px; left:0; font-size:.68rem; color:var(--muted); }
         .page img { display:block; width:100%; height:auto; border-radius:4px; }
         .overlay { position:absolute; inset:0; }
@@ -108,10 +108,15 @@ $maxFiles = (int) ini_get('max_file_uploads');
         .modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.9); z-index:50; align-items:center; justify-content:center; padding:24px; }
         .modal.open { display:flex; }
         .modal .mbox { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:18px; max-width:92vw; max-height:90vh; overflow:auto; display:flex; flex-direction:column; gap:12px; }
-        .modal .mhead { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-        .modal #modalImg { max-width:100%; max-height:65vh; object-fit:contain; background:#000; border-radius:8px; align-self:center; }
+        .modal .mhead { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+        #zoomWrap { overflow:auto; max-height:65vh; border-radius:8px; background:#000; display:flex; align-items:flex-start; justify-content:center; }
+        .modal #modalImg { max-width:100%; max-height:65vh; object-fit:contain; display:block; }
+        .zoom-controls { display:flex; align-items:center; gap:4px; }
+        #zoomLabel { font-size:.78rem; color:var(--muted); min-width:3.2em; text-align:center; user-select:none; }
         .modal .ce-hint, .modal .ce-bar { color:var(--muted); }
         .modal .ce-stage { background:#000; border-color:var(--border); }
+        .ce-rect i[data-h="rot"] { left:calc(50% - 8px); top:-36px; width:16px; height:16px; border-radius:50%; background:#fbbf24; border-color:#fff; cursor:grab; }
+        .ce-rect i[data-h="rot"]::before { content:''; position:absolute; left:50%; top:100%; width:2px; height:16px; margin-left:-1px; background:#fbbf24; }
 
         /* ── manual crop ── */
         #manualBtn.active { background:#fbbf24; color:#000; border-color:#fbbf24; font-weight:800; }
@@ -176,6 +181,12 @@ $maxFiles = (int) ini_get('max_file_uploads');
                     <section class="viewer">
                         <div class="pane-head">
                             <div class="pane-title" id="docTitle"></div>
+                            <div class="zoom-controls">
+                                <button type="button" class="btn" id="vpZoomOut" style="padding:4px 10px" title="Zoom out (mouse wheel down)">−</button>
+                                <span id="vpZoomLabel" style="font-size:.78rem;color:var(--muted);min-width:3.2em;text-align:center">100%</span>
+                                <button type="button" class="btn" id="vpZoomIn" style="padding:4px 10px" title="Zoom in (mouse wheel up)">+</button>
+                                <button type="button" class="btn" id="vpZoomReset" style="padding:4px 10px" title="Reset zoom">↺</button>
+                            </div>
                             <div id="pageBtns" style="display:flex;gap:6px"></div>
                         </div>
                         <div class="viewport" id="viewport"></div>
@@ -208,12 +219,18 @@ $maxFiles = (int) ini_get('max_file_uploads');
         <div class="mbox" id="mbox">
             <div class="mhead">
                 <b id="modalCap" style="font-size:.9rem"></b>
-                <span style="display:flex;gap:8px;align-items:center">
+                <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                     <button type="button" class="btn" id="adjustBtn">✂ Adjust crop</button>
+                    <span class="zoom-controls">
+                        <button type="button" class="btn" id="zoomOutBtn" title="Zoom out (scroll down)">−</button>
+                        <span id="zoomLabel">100%</span>
+                        <button type="button" class="btn" id="zoomInBtn" title="Zoom in (scroll up)">+</button>
+                        <button type="button" class="btn" id="zoomResetBtn" title="Reset zoom">↺</button>
+                    </span>
                     <button type="button" class="btn" id="modalClose">×</button>
                 </span>
             </div>
-            <img id="modalImg" alt="">
+            <div id="zoomWrap"><img id="modalImg" alt=""></div>
             <div id="cropEditor" style="display:none">
                 <div class="ce-hint">Drag the box to move it, drag a handle to resize. The picture is re-cut from the page.</div>
                 <div class="ce-stage" id="ceStage">
@@ -221,11 +238,16 @@ $maxFiles = (int) ini_get('max_file_uploads');
                     <div class="ce-rect" id="ceRect">
                         <i data-h="nw"></i><i data-h="n"></i><i data-h="ne"></i><i data-h="e"></i>
                         <i data-h="se"></i><i data-h="s"></i><i data-h="sw"></i><i data-h="w"></i>
+                        <i data-h="rot" title="Drag to tilt the box"></i>
                     </div>
                 </div>
                 <div class="ce-bar">
                     <span id="ceInfo"></span>
-                    <span style="display:flex;gap:8px">
+                    <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                        <label style="display:flex;gap:6px;align-items:center;margin-right:6px" title="Tilt the crop box to follow slanted handwriting">Tilt
+                            <input type="range" id="ceTilt" min="-45" max="45" step="0.1" value="0" style="width:120px">
+                            <b id="ceTiltVal" style="min-width:3.2em;text-align:right">0°</b>
+                        </label>
                         <button type="button" class="btn" id="ceReset">Reset</button>
                         <button type="button" class="btn" id="ceCancel">Cancel</button>
                         <button type="button" class="btn" id="ceApply" style="background:#4ade80;color:#052e16;border-color:#4ade80">✓ Apply</button>
@@ -389,6 +411,7 @@ $maxFiles = (int) ini_get('max_file_uploads');
                 <img src="${p.src}" alt="Page ${p.no}"><div class="overlay">${boxes}</div></div>`;
         }).join('');
         $('viewport').scrollTop = 0;
+        applyViewZoom();
 
         $('grid').innerHTML = r.words.map(w => `
             <div class="wcard${d.sel.has(w.id) ? ' sel' : ''}" id="wc-${w.id}" data-id="${w.id}">
@@ -604,22 +627,94 @@ $maxFiles = (int) ini_get('max_file_uploads');
         });
     }
 
+    /* ───────── main page viewer zoom (mouse wheel) ───────── */
+    let viewZoom = 1;
+    const VZ_STEP = 1.15, VZ_MIN = 0.3, VZ_MAX = 6;
+
+    function applyViewZoom() {
+        document.querySelectorAll('#viewport .page').forEach(p => { p.style.width = (viewZoom * 100) + '%'; });
+        $('vpZoomLabel').textContent = Math.round(viewZoom * 100) + '%';
+    }
+    // zoom keeping the point under (cx, cy) (viewport-relative px) fixed
+    function setViewZoom(z, cx, cy) {
+        const vp = $('viewport');
+        z = Math.min(VZ_MAX, Math.max(VZ_MIN, z));
+        if (z === viewZoom) return;
+        const ratio = z / viewZoom;
+        if (cx === undefined) { cx = vp.clientWidth / 2; cy = vp.clientHeight / 2; }
+        const px = vp.scrollLeft + cx, py = vp.scrollTop + cy;
+        viewZoom = z;
+        applyViewZoom();
+        vp.scrollLeft = px * ratio - cx;
+        vp.scrollTop = py * ratio - cy;
+    }
+    $('viewport').addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const r = $('viewport').getBoundingClientRect();
+        setViewZoom(viewZoom * (e.deltaY < 0 ? VZ_STEP : 1 / VZ_STEP), e.clientX - r.left, e.clientY - r.top);
+    }, { passive: false });
+    $('vpZoomIn').onclick = () => setViewZoom(viewZoom * VZ_STEP);
+    $('vpZoomOut').onclick = () => setViewZoom(viewZoom / VZ_STEP);
+    $('vpZoomReset').onclick = () => setViewZoom(1);
+
+    /* ───────── modal image zoom ───────── */
+    let modalZoom = 1;
+    const ZOOM_STEP = 0.25, ZOOM_MIN = 0.25, ZOOM_MAX = 8;
+
+    function applyZoom() {
+        const img = $('modalImg'), wrap = $('zoomWrap');
+        if (modalZoom === 1) {
+            img.style.width = ''; img.style.height = '';
+            img.style.maxWidth = '100%'; img.style.maxHeight = '65vh';
+        } else {
+            const natW = img.naturalWidth || 1, natH = img.naturalHeight || 1;
+            const wW = wrap.clientWidth || 600, wH = Math.round(window.innerHeight * 0.65);
+            const scale = Math.min(wW / natW, wH / natH);
+            img.style.maxWidth = 'none'; img.style.maxHeight = 'none';
+            img.style.width  = Math.round(natW * scale * modalZoom) + 'px';
+            img.style.height = Math.round(natH * scale * modalZoom) + 'px';
+        }
+        $('zoomLabel').textContent = Math.round(modalZoom * 100) + '%';
+    }
+
+    function zoomIn()    { modalZoom = Math.min(ZOOM_MAX, parseFloat((modalZoom + ZOOM_STEP).toFixed(2))); applyZoom(); }
+    function zoomOut()   { modalZoom = Math.max(ZOOM_MIN, parseFloat((modalZoom - ZOOM_STEP).toFixed(2))); applyZoom(); }
+    function resetZoom() { modalZoom = 1; applyZoom(); }
+
+    $('zoomInBtn').onclick    = (e) => { e.stopPropagation(); zoomIn(); };
+    $('zoomOutBtn').onclick   = (e) => { e.stopPropagation(); zoomOut(); };
+    $('zoomResetBtn').onclick = (e) => { e.stopPropagation(); resetZoom(); };
+
+    $('zoomWrap').addEventListener('wheel', (e) => {
+        if (!$('modalImg').src) return;
+        e.preventDefault();
+        e.deltaY < 0 ? zoomIn() : zoomOut();
+    }, { passive: false });
+
     /* ───────── view + adjust an already cropped image ───────── */
     let modalWord = null;
     const modalTitleFor = (w) => `${w.label} (${w.w}×${w.h} px)`;
-    const ed = { rect: null, orig: null, region: null, k: 1, s: 1, img: null, page: null };
+    const ed = { rect: null, orig: null, region: null, k: 1, s: 1, img: null, page: null, angle: 0 };
+    function setTilt(a) {
+        ed.angle = Math.max(-45, Math.min(45, Math.round(a * 10) / 10));
+        $('ceTilt').value = ed.angle;
+        $('ceTiltVal').textContent = ed.angle + '°';
+        if (ed.rect) drawRect();
+    }
+    $('ceTilt').oninput = (e) => setTilt(parseFloat(e.target.value) || 0);
+    $('ceTilt').ondblclick = () => setTilt(0);
 
     function openModal(id, edit) {
         const d = docs[cur]; if (!d || !d.res || !d.res.words) return;
         modalWord = d.res.words.find(x => x.id === id);
         if (!modalWord) return;
-        endEdit();
+        endEdit(); resetZoom();
         $('modalImg').src = modalWord.file + '?v=' + (modalWord.v || 0);
         $('modalCap').textContent = modalTitleFor(modalWord);
         $('modal').classList.add('open');
         if (edit) startEdit();
     }
-    function closeModal() { endEdit(); $('modal').classList.remove('open'); }
+    function closeModal() { endEdit(); resetZoom(); $('modal').classList.remove('open'); }
 
     function startEdit() {
         const w = modalWord, d = docs[cur];
@@ -630,7 +725,8 @@ $maxFiles = (int) ini_get('max_file_uploads');
         ed.img = img; ed.page = pg; ed.s = img.naturalWidth / pg.w;
         ed.orig = { x: w.crop.x, y: w.crop.y, w: w.w, h: w.h };
         ed.rect = { ...ed.orig };
-        const m = Math.max(40, Math.round(Math.max(w.w, w.h) * 0.6));
+        ed.angle = 0; $('ceTilt').value = 0; $('ceTiltVal').textContent = '0°';
+        const m =Math.max(40, Math.round(Math.max(w.w, w.h) * 0.6));
         const rx = Math.max(0, w.crop.x - m), ry = Math.max(0, w.crop.y - m);
         ed.region = { x: rx, y: ry, w: Math.min(pg.w, w.crop.x + w.w + m) - rx, h: Math.min(pg.h, w.crop.y + w.h + m) - ry };
         ed.k = Math.min(720 / ed.region.w, 380 / ed.region.h, 6);
@@ -654,6 +750,7 @@ $maxFiles = (int) ini_get('max_file_uploads');
         el.style.top = (r.y - ed.region.y) * ed.k + 'px';
         el.style.width = r.w * ed.k + 'px';
         el.style.height = r.h * ed.k + 'px';
+        el.style.transform = ed.angle ? `rotate(${ed.angle}deg)` : '';
         $('ceInfo').textContent = `${Math.round(r.w)}×${Math.round(r.h)} px` + (ed.s < 1 ? ' · page preview is downscaled, so the new crop has a lower resolution' : '');
     }
     $('ceRect').addEventListener('pointerdown', (e) => {
@@ -661,20 +758,37 @@ $maxFiles = (int) ini_get('max_file_uploads');
         const handle = e.target.dataset.h || 'move';
         const start = { px: e.clientX, py: e.clientY, ...ed.rect };
         const R = ed.region, MIN = 4;
+        const box = $('ceRect').getBoundingClientRect();
+        const scx = box.left + box.width / 2, scy = box.top + box.height / 2;
         const move = (ev) => {
-            const dx = (ev.clientX - start.px) / ed.k, dy = (ev.clientY - start.py) / ed.k;
-            let x0 = start.x, y0 = start.y, x1 = start.x + start.w, y1 = start.y + start.h;
-            if (handle === 'move') {
-                x0 = Math.min(Math.max(start.x + dx, R.x), R.x + R.w - start.w);
-                y0 = Math.min(Math.max(start.y + dy, R.y), R.y + R.h - start.h);
-                x1 = x0 + start.w; y1 = y0 + start.h;
-            } else {
-                if (handle.includes('w')) x0 = Math.min(Math.max(start.x + dx, R.x), x1 - MIN);
-                if (handle.includes('e')) x1 = Math.max(Math.min(x1 + dx, R.x + R.w), x0 + MIN);
-                if (handle.includes('n')) y0 = Math.min(Math.max(start.y + dy, R.y), y1 - MIN);
-                if (handle.includes('s')) y1 = Math.max(Math.min(y1 + dy, R.y + R.h), y0 + MIN);
+            if (handle === 'rot') {
+                let a = Math.atan2(ev.clientX - scx, -(ev.clientY - scy)) * 180 / Math.PI;
+                if (ev.shiftKey) a = Math.round(a / 5) * 5;
+                setTilt(a);
+                return;
             }
-            ed.rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+            const dx = (ev.clientX - start.px) / ed.k, dy = (ev.clientY - start.py) / ed.k;
+            const th = ed.angle * Math.PI / 180, cos = Math.cos(th), sin = Math.sin(th);
+            const cx0 = start.x + start.w / 2, cy0 = start.y + start.h / 2;
+            if (handle === 'move') {
+                const cx = Math.min(Math.max(cx0 + dx, R.x), R.x + R.w), cy = Math.min(Math.max(cy0 + dy, R.y), R.y + R.h);
+                ed.rect = { x: cx - start.w / 2, y: cy - start.h / 2, w: start.w, h: start.h };
+            } else {
+                // resize in the box's own (tilted) frame, relative to its centre
+                const ldx = dx * cos + dy * sin, ldy = -dx * sin + dy * cos;
+                let l = -start.w / 2, r = start.w / 2, t = -start.h / 2, b = start.h / 2;
+                if (handle.includes('w')) l = Math.min(l + ldx, r - MIN);
+                if (handle.includes('e')) r = Math.max(r + ldx, l + MIN);
+                if (handle.includes('n')) t = Math.min(t + ldy, b - MIN);
+                if (handle.includes('s')) b = Math.max(b + ldy, t + MIN);
+                if (!ed.angle) {
+                    l = Math.max(l, R.x - cx0); r = Math.min(r, R.x + R.w - cx0);
+                    t = Math.max(t, R.y - cy0); b = Math.min(b, R.y + R.h - cy0);
+                }
+                const lcx = (l + r) / 2, lcy = (t + b) / 2;
+                const cx = cx0 + lcx * cos - lcy * sin, cy = cy0 + lcx * sin + lcy * cos;
+                ed.rect = { x: cx - (r - l) / 2, y: cy - (b - t) / 2, w: r - l, h: b - t };
+            }
             drawRect();
         };
         const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
@@ -682,14 +796,26 @@ $maxFiles = (int) ini_get('max_file_uploads');
     });
     $('adjustBtn').onclick = startEdit;
     $('ceCancel').onclick = endEdit;
-    $('ceReset').onclick = () => { ed.rect = { ...ed.orig }; drawRect(); };
+    $('ceReset').onclick = () => { ed.rect = { ...ed.orig }; setTilt(0); };
     $('ceApply').onclick = async () => {
         const w = modalWord, r = ed.rect, btn = $('ceApply');
         if (!w || !r) return;
-        if (!await askConfirm({ title: 'Apply this crop?', message: `The picture of ${w.label} is replaced by the new crop.`, confirmText: 'Apply' })) return;
         const ow = Math.max(1, Math.round(r.w * ed.s)), oh = Math.max(1, Math.round(r.h * ed.s));
         const out = document.createElement('canvas'); out.width = ow; out.height = oh;
-        out.getContext('2d').drawImage(ed.img, r.x * ed.s, r.y * ed.s, r.w * ed.s, r.h * ed.s, 0, 0, ow, oh);
+        const octx = out.getContext('2d');
+        if (ed.angle) {
+            // sample the tilted box from the page and straighten it
+            octx.fillStyle = '#fff'; octx.fillRect(0, 0, ow, oh);
+            octx.translate(ow / 2, oh / 2);
+            octx.rotate(-ed.angle * Math.PI / 180);
+            octx.drawImage(ed.img, -(r.x + r.w / 2) * ed.s, -(r.y + r.h / 2) * ed.s);
+        } else {
+            octx.drawImage(ed.img, r.x * ed.s, r.y * ed.s, r.w * ed.s, r.h * ed.s, 0, 0, ow, oh);
+        }
+        // axis-aligned bounds of the (possibly tilted) box, for the overlay on the page
+        const ath = Math.abs(ed.angle) * Math.PI / 180;
+        const bw = r.w * Math.cos(ath) + r.h * Math.sin(ath), bh = r.w * Math.sin(ath) + r.h * Math.cos(ath);
+        const bx = r.x + r.w / 2 - bw / 2, by = r.y + r.h / 2 - bh / 2;
         btn.disabled = true;
         try {
             const blob = await new Promise(res => out.toBlob(res, 'image/png'));
@@ -701,7 +827,7 @@ $maxFiles = (int) ini_get('max_file_uploads');
             if (!data.ok) throw new Error(data.error || 'save failed');
             w.w = data.w; w.h = data.h;
             w.crop = { x: Math.round(r.x), y: Math.round(r.y) };
-            w.box = { x: w.crop.x, y: w.crop.y, w: Math.round(r.w), h: Math.round(r.h) };
+            w.box = { x: Math.round(bx), y: Math.round(by), w: Math.round(bw), h: Math.round(bh) };
             w.v = Date.now();
             const th = $('th-' + w.id); if (th) th.src = w.file + '?v=' + w.v;
             const dm = $('dim-' + w.id); if (dm) dm.textContent = `${w.w}×${w.h}`;

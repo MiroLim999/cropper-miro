@@ -28,6 +28,8 @@
         if (m.same) parts.push(`${m.same} already identical`);
         if (m.kept) parts.push(`${m.kept} kept as they were (you already had a label)`);
         if (m.missing) parts.push(`${m.missing} not in this dataset`);
+        if (m.conflict) parts.push(`${m.conflict} skipped: same file name but a different picture`);
+        if (m.by_name) parts.push(`${m.by_name} matched by file name only (no uid column)`);
         if (m.empty) parts.push(`${m.empty} without a label`);
         return parts.join(' · ');
     }
@@ -41,7 +43,7 @@
             if (!f) return;
             const ok = await askConfirm({
                 title: 'Merge this annotated file?',
-                message: `${f.name} is read and its labels are merged into your dataset by image file name. Images you already labeled are kept.`,
+                message: `${f.name} is read and its labels are merged into your dataset by each image's unique uid (file name only when the file has no uid column). Images you already labeled are kept.`,
                 confirmText: 'Merge', checkbox: 'Replace my existing labels when they differ'
             });
             if (!ok) return;
@@ -79,7 +81,7 @@
             if (!list.length) return;
             if (!await askConfirm({ title: `Add ${list.length} file(s) to annotate?`,
                 message: 'The pictures are added to the dataset as "to label" (original pixels, unchanged). A .zip of images is unpacked.', confirmText: 'Upload' })) return;
-            const tot = { added: 0, duplicate: 0, invalid: 0 };
+            const tot = { added: 0, duplicate: 0, invalid: 0, labels: 0 };
             try {
                 const CH = 15;
                 for (let i = 0; i < list.length; i += CH) {
@@ -87,9 +89,10 @@
                     const fd = new FormData(); fd.append('action', 'upload_images');
                     list.slice(i, i + CH).forEach(f => fd.append('files[]', f, f.name));
                     const j = await call(fd);
-                    tot.added += j.added; tot.duplicate += j.duplicate; tot.invalid += j.invalid;
+                    tot.added += j.added; tot.duplicate += j.duplicate; tot.invalid += j.invalid; tot.labels += j.labels || 0;
                 }
-                const p = [`${tot.added} image(s) added to annotate`];
+                const p = [`${tot.added} image(s) added`];
+                if (tot.labels) p.push(`${tot.labels} label(s) imported with them`);
                 if (tot.duplicate) p.push(`${tot.duplicate} already in the dataset`);
                 if (tot.invalid) p.push(`${tot.invalid} not readable / not an image`);
                 o.onMsg('✓ ' + p.join(' · '), true);
@@ -138,6 +141,17 @@
             });
             run(c.download[0], 'htr_dataset/annotated_labels.xlsx', 'annotated_labels.xlsx');
             run(c.download[1], 'htr_dataset/labels.csv', 'labels.csv');
+            if (c.zipBtn && $(c.zipBtn)) $(c.zipBtn).addEventListener('click', async () => {
+                if (!await askConfirm({ title: 'Download the annotated dataset?', message: 'A .zip with the annotated images and their labels (labels.csv / labels.xlsx). Images still to label are left out.', confirmText: 'Download' })) return;
+                try {
+                    msg('Packing the annotated dataset…', true);
+                    const j = await call(form({ action: 'build_annotated_zip' }));
+                    const a = document.createElement('a');
+                    a.href = j.file + '?v=' + Date.now(); a.download = 'annotated.zip';
+                    document.body.appendChild(a); a.click(); a.remove();
+                    msg(`✓ Downloaded annotated.zip: ${j.count} image(s) with their labels (${(j.size / 1048576).toFixed(2)} MB).`, true);
+                } catch (err) { msg(err.message, false); }
+            });
             $(c.importBtn).addEventListener('click', () => pickAndImport({ onMsg: msg, onMerged: c.onMerged }));
         },
 

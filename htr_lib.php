@@ -56,6 +56,23 @@ function htrSaveManifest(array $items): void
 }
 
 /**
+ * Gives every image a content-based id (sha1 of the stored file). Unlike htr_0005.png it means the
+ * same thing on every machine, so labels can be merged without mixing datasets up.
+ * Returns true when something was added (the manifest then needs saving).
+ */
+function htrEnsureUids(array &$items): bool
+{
+    $changed = false;
+    foreach ($items as &$r) {
+        if (!empty($r['uid'])) continue;
+        $p = __DIR__ . '/htr_dataset/images/' . basename((string) ($r['processed_filename'] ?? ''));
+        if (is_file($p)) { $r['uid'] = substr(sha1_file($p), 0, 20); $changed = true; }
+    }
+    unset($r);
+    return $changed;
+}
+
+/**
  * Writes the label files used for training from the annotation state:
  *   dataset_labels.xlsx  - spreadsheet (ID, image, path, size, transcription, status)
  *   labels.csv           - image,text   (UTF-8)
@@ -68,10 +85,10 @@ function htrExportLabels(array $items): array
     writeXlsx(
         $dir . 'dataset_labels.xlsx',
         'HTR Dataset',
-        ['ID', 'Image Filename', 'Relative Path', 'Width', 'Height', 'Transcription', 'Status'],
+        ['ID', 'Image Filename', 'Relative Path', 'Width', 'Height', 'Transcription', 'Status', 'UID'],
         array_map(fn($r) => [
             $r['id'], $r['processed_filename'], $r['relative_path'], $r['width'], $r['height'],
-            $r['transcription'], $r['status'],
+            $r['transcription'], $r['status'], $r['uid'] ?? '',
         ], $items)
     );
 
@@ -79,10 +96,10 @@ function htrExportLabels(array $items): array
     writeXlsx(
         $dir . 'annotated_labels.xlsx',
         'Annotated',
-        ['ID', 'Image Filename', 'Relative Path', 'Width', 'Height', 'Transcription', 'Status'],
+        ['ID', 'Image Filename', 'Relative Path', 'Width', 'Height', 'Transcription', 'Status', 'UID'],
         array_values(array_map(fn($r) => [
             $r['id'], $r['processed_filename'], $r['relative_path'], $r['width'], $r['height'],
-            $r['transcription'], $r['status'],
+            $r['transcription'], $r['status'], $r['uid'] ?? '',
         ], array_filter($items, fn($r) => ($r['status'] ?? '') === 'labeled')))
     );
 
@@ -461,7 +478,7 @@ function htrParseLabelFile(string $path, string $origName): array
             $f = (string) ($r['processed_filename'] ?? $r['original_filename'] ?? '');
             if ($f === '') continue;
             $out[] = ['file' => basename($f), 'text' => (string) ($r['transcription'] ?? ''), 'status' => (string) ($r['status'] ?? ''),
-                      'orig' => (string) ($r['original_filename'] ?? '')];
+                      'orig' => (string) ($r['original_filename'] ?? ''), 'uid' => (string) ($r['uid'] ?? '')];
         }
         return $out;
     }
@@ -487,13 +504,14 @@ function htrParseLabelFile(string $path, string $origName): array
     if (!$table) return [];
 
     // header row? find the columns by name, otherwise assume: image, text
-    $fi = 0; $ti = 1; $si = -1; $start = 0;
+    $fi = 0; $ti = 1; $si = -1; $ui = -1; $start = 0;
     $head = array_map(fn($h) => strtolower(trim((string) $h)), $table[0]);
     $hasHead = false;
     foreach ($head as $i => $h) {
         if (in_array($h, ['image', 'image filename', 'filename', 'file', 'processed_filename'], true)) { $fi = $i; $hasHead = true; }
         elseif (in_array($h, ['text', 'transcription', 'label', 'word'], true)) { $ti = $i; $hasHead = true; }
         elseif ($h === 'status') { $si = $i; $hasHead = true; }
+        elseif (in_array($h, ['uid', 'image_id'], true)) { $ui = $i; $hasHead = true; }
     }
     if ($hasHead) $start = 1;
 
@@ -503,7 +521,8 @@ function htrParseLabelFile(string $path, string $origName): array
         $f = trim((string) ($r[$fi] ?? ''));
         if ($f === '') continue;
         $out[] = ['file' => basename(str_replace('\\', '/', $f)), 'text' => (string) ($r[$ti] ?? ''),
-                  'status' => $si >= 0 ? strtolower(trim((string) ($r[$si] ?? ''))) : '', 'orig' => ''];
+                  'status' => $si >= 0 ? strtolower(trim((string) ($r[$si] ?? ''))) : '', 'orig' => '',
+                  'uid' => $ui >= 0 ? strtolower(trim((string) ($r[$ui] ?? ''))) : ''];
     }
     return $out;
 }
@@ -515,12 +534,15 @@ function htrParseLabelFile(string $path, string $origName): array
  */
 function htrMergeLabels(array &$items, array $rows, bool $overwrite): array
 {
-    $byProc = []; $byOrig = [];
+    // A row that carries a uid (content id) is matched on that alone: file names such as htr_0005.png
+    // are only counters and mean a different picture in another dataset.
+    $byProc = []; $byOrig = []; $byUid = [];
     foreach ($items as $k => $r) {
         $byProc[$r['processed_filename']] = $k;
         $byOrig[$r['original_filename']][] = $k;
+        if (!empty($r['uid'])) $byUid[$r['uid']][] = $k;
     }
-    $st = ['rows' => count($rows), 'updated' => 0, 'same' => 0, 'kept' => 0, 'missing' => 0, 'empty' => 0];
+    $st = ['rows' => count($rows), 'updated' => 0, 'same' => 0, 'kept' => 0, 'missing' => 0, 'empty' => 0, 'conflict' => 0, 'by_name' => 0];
     foreach ($rows as $row) {
         $text = preg_replace('/\s+/u', ' ', trim(mb_substr($row['text'], 0, 300)));
         $status = $row['status'];
@@ -529,16 +551,33 @@ function htrMergeLabels(array &$items, array $rows, bool $overwrite): array
         if ($status === '' || $status === 'pending') { $st['empty']++; continue; }   // nothing to bring over
         if ($status === 'unreadable') $text = '';
 
-        $k = $byProc[$row['file']] ?? null;
-        if ($k === null && !empty($row['orig']) && count($byOrig[$row['orig']] ?? []) === 1) $k = $byOrig[$row['orig']][0];
-        if ($k === null) { $st['missing']++; continue; }
+        $uid = (string) ($row['uid'] ?? '');
+        if ($uid !== '') {
+            $ks = $byUid[$uid] ?? [];
+            if (!$ks) { $st['missing']++; continue; }
+        } else {
+            $st['by_name']++;
+            $k = $byProc[$row['file']] ?? null;
+            $orig = (string) ($row['orig'] ?? '');
+            if ($k !== null && $orig !== '' && $items[$k]['original_filename'] !== $orig) {
+                // same counter name, different picture: only trust an unambiguous match on the original name
+                $k = count($byOrig[$orig] ?? []) === 1 ? $byOrig[$orig][0] : null;
+                if ($k === null) { $st['conflict']++; continue; }
+            } elseif ($k === null && $orig !== '' && count($byOrig[$orig] ?? []) === 1) {
+                $k = $byOrig[$orig][0];
+            }
+            if ($k === null) { $st['missing']++; continue; }
+            $ks = [$k];
+        }
 
-        $cur = $items[$k];
-        if ($cur['status'] === $status && $cur['transcription'] === $text) { $st['same']++; continue; }
-        if ($cur['status'] !== 'pending' && !$overwrite) { $st['kept']++; continue; }
-        $items[$k]['status'] = $status;
-        $items[$k]['transcription'] = $text;
-        $st['updated']++;
+        foreach ($ks as $k) {
+            $cur = $items[$k];
+            if ($cur['status'] === $status && $cur['transcription'] === $text) { $st['same']++; continue; }
+            if ($cur['status'] !== 'pending' && !$overwrite) { $st['kept']++; continue; }
+            $items[$k]['status'] = $status;
+            $items[$k]['transcription'] = $text;
+            $st['updated']++;
+        }
     }
     return $st;
 }

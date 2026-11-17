@@ -460,11 +460,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
             <div class="kc-io">
                 <div class="kc-io-title">Annotated dataset</div>
                 <div class="kc-result-btns" style="margin-top:8px;">
+                    <button type="button" class="kc-btn" id="dlAnnotatedZip">⬇ Download annotated dataset (.zip)</button>
                     <button type="button" class="kc-btn" id="dlLabels">⬇ Download annotated only (.xlsx)</button>
                     <button type="button" class="kc-btn" id="dlCsv">⬇ labels.csv</button>
                     <button type="button" class="kc-btn" id="impLabels">⬆ Import annotated file</button>
                 </div>
-                <div class="kc-drop-sub" style="margin-top:8px;">Import an .xlsx, .csv, .tsv or manifest .json that was annotated elsewhere: its labels are merged into this dataset by image file name.</div>
+                <div class="kc-drop-sub" style="margin-top:8px;">Import an .xlsx, .csv, .tsv or manifest .json that was annotated elsewhere: its labels are merged into this dataset by each image's unique uid. The .zip holds the annotated images together with their labels (<code>labels.csv</code> / <code>labels.xlsx</code>).</div>
                 <div id="ioMsg" class="kc-io-msg"></div>
             </div>
             <div class="kc-io">
@@ -546,7 +547,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'batch
 
             LabelsIO.wireZip({ btn: 'buildZip', split: 'zipSplit', msg: 'zipMsg' });
             LabelsIO.wire({
-                download: ['dlLabels', 'dlCsv'], importBtn: 'impLabels', msg: 'ioMsg',
+                download: ['dlLabels', 'dlCsv'], zipBtn: 'dlAnnotatedZip', importBtn: 'impLabels', msg: 'ioMsg',
                 onMerged: () => {}
             });
             LabelsIO.wirePending({ download: 'dlPending', upload: 'upPending', msg: 'pendMsg' });

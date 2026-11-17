@@ -28,6 +28,7 @@ $lock = fopen(__DIR__ . '/htr_dataset/.lock', 'c');
 flock($lock, LOCK_EX);
 
 $items = htrLoadManifest();
+if (htrEnsureUids($items)) htrSaveManifest($items);   // content ids make transfers between datasets safe
 
 if ($action === 'list') {
     out(['ok' => true, 'items' => $items, 'stats' => stats($items)]);
@@ -95,23 +96,30 @@ if ($action === 'upload_images') {
     $files = uploadedFiles('files');
     if (!$files) out(['ok' => false, 'error' => 'No file received (the server may limit the upload size).'], 400);
     $maxId = 0; $have = [];
-    foreach ($items as $r) { $maxId = max($maxId, (int) $r['id']); $have[$r['original_filename']] = true; }
+    foreach ($items as $r) { $maxId = max($maxId, (int) $r['id']); if (!empty($r['uid'])) $have[$r['uid']] = true; }
     $res = ['added' => 0, 'duplicate' => 0, 'invalid' => 0];
     $add = function (string $bytes, string $name) use (&$items, &$maxId, &$have, &$res, $htrImageDir): void {
         $name = basename(str_replace('\\', '/', $name));
-        if (isset($have[$name])) { $res['duplicate']++; return; }
         $img = @imagecreatefromstring($bytes);
         if (!$img || imagesx($img) < 2 || imagesy($img) < 2) { $res['invalid']++; return; }
+        // PNGs are stored byte for byte (so their content id equals the one in the exported template);
+        // JPG / WEBP are converted losslessly to PNG.
+        if (strncmp($bytes, chr(137) . 'PNG', 4) !== 0) { ob_start(); imagepng($img, null, 6); $bytes = (string) ob_get_clean(); }
+        $uid = substr(sha1($bytes), 0, 20);
+        if (isset($have[$uid])) { imagedestroy($img); $res['duplicate']++; return; }   // the very same picture is already here
         $id = ++$maxId;
         $fn = sprintf('htr_%04d.png', $id);
-        imagepng($img, $htrImageDir . $fn, 6);          // lossless: the pixels are kept as they are
+        while (is_file($htrImageDir . $fn)) $fn = sprintf('htr_%04d.png', ++$maxId);   // never overwrite an existing image
+        $id = $maxId;
+        file_put_contents($htrImageDir . $fn, $bytes);
         $items[] = ['id' => $id, 'original_filename' => $name, 'processed_filename' => $fn,
                     'relative_path' => 'htr_dataset/images/' . $fn, 'width' => imagesx($img), 'height' => imagesy($img),
-                    'transcription' => '', 'status' => 'pending', 'source' => 'upload'];
+                    'transcription' => '', 'status' => 'pending', 'source' => 'upload', 'uid' => $uid];
         imagedestroy($img);
-        $have[$name] = true; $res['added']++;
+        $have[$uid] = true; $res['added']++;
     };
     $okExt = ['png', 'jpg', 'jpeg', 'webp'];
+    $labelFiles = []; $res['labels'] = 0;
     foreach ($files as [$name, $tmp, $err, $size]) {
         if ($err !== UPLOAD_ERR_OK || $size > 200 * 1024 * 1024) { $res['invalid']++; continue; }
         $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
@@ -122,6 +130,12 @@ if ($action === 'upload_images') {
             for ($i = 0; $i < $z->numFiles; $i++) {
                 $st = $z->statIndex($i);
                 $en = (string) $st['name'];
+                if (in_array(strtolower(basename($en)), ['labels.csv', 'labels.xlsx'], true) && $st['size'] <= 10 * 1024 * 1024) {
+                    $lt = tempnam(sys_get_temp_dir(), 'lbl');
+                    file_put_contents($lt, (string) $z->getFromIndex($i));
+                    $labelFiles[] = [$lt, basename($en)];
+                    continue;
+                }
                 if (substr($en, -1) === '/' || strpos($en, '__MACOSX') !== false || !in_array(strtolower(pathinfo($en, PATHINFO_EXTENSION)), $okExt, true)) continue;
                 if ($st['size'] > 20 * 1024 * 1024) { $res['invalid']++; continue; }
                 $add((string) $z->getFromIndex($i), $en);
@@ -134,7 +148,12 @@ if ($action === 'upload_images') {
             $res['invalid']++;
         }
     }
-    if ($res['added'] > 0) {
+    // an annotated.zip also brings its labels: they are merged by uid right away
+    foreach ($labelFiles as [$lt, $ln]) {
+        try { $res['labels'] += htrMergeLabels($items, htrParseLabelFile($lt, $ln), false)['updated']; } catch (Throwable $e) {}
+        @unlink($lt);
+    }
+    if ($res['added'] > 0 || $res['labels'] > 0) {
         htrSaveManifest($items);
         htrExportLabels($items);
     }
@@ -150,24 +169,55 @@ if ($action === 'build_pending_zip') {
         $p = __DIR__ . '/htr_dataset/images/' . $r['processed_filename'];
         if (!is_file($p)) continue;
         $files['not_annotated/images/' . $r['processed_filename']] = (string) file_get_contents($p);
-        $rows[] = [$r['processed_filename'], '', ''];
+        $rows[] = [$r['processed_filename'], '', '', $r['uid'] ?? ''];
     }
     if (!$rows) out(['ok' => false, 'error' => 'The image files are missing.'], 400);
     $csv = "\xEF\xBB\xBF" . "image,text,status\r\n";
     foreach ($rows as $row) $csv .= $row[0] . ",,\r\n";
     $files['not_annotated/labels_template.csv'] = $csv;
     $tmpX = tempnam(sys_get_temp_dir(), 'tpl');
-    writeXlsx($tmpX, 'To annotate', ['image', 'text', 'status'], $rows);
+    writeXlsx($tmpX, 'To annotate', ['image', 'text', 'status', 'uid'], $rows);
     $files['not_annotated/labels_template.xlsx'] = (string) file_get_contents($tmpX);
     @unlink($tmpX);
     $files['not_annotated/README.txt'] = "Type the word of every image in the 'text' column of labels_template.csv (or .xlsx).\r\n" .
         "Write 'unreadable' in the 'status' column for an image that cannot be read.\r\n" .
-        "Then use 'Import annotated file' in the Word Cropper to merge the labels back (matched by image file name).\r\n";
+        "Then use 'Import annotated file' in the Word Cropper to merge the labels back (matched by the uid column, so it never mixes up datasets; keep that column).\r\n";
     $dir = __DIR__ . '/htr_dataset/exports/';
     if (!is_dir($dir)) mkdir($dir, 0777, true);
     $zip = $dir . 'not_annotated.zip';
     if (!createMinimalZip($zip, $files)) out(['ok' => false, 'error' => 'Could not write the zip file.'], 500);
     out(['ok' => true, 'count' => count($rows), 'file' => 'htr_dataset/exports/not_annotated.zip', 'size' => filesize($zip)]);
+}
+
+if ($action === 'build_annotated_zip') {
+    // the finished images together with their labels (value), ready to move to another dataset
+    $done = array_values(array_filter($items, fn($r) => ($r['status'] ?? '') === 'labeled' && trim((string) ($r['transcription'] ?? '')) !== ''));
+    if (!$done) out(['ok' => false, 'error' => 'Nothing to download yet: no image has been annotated.'], 400);
+    $files = []; $rows = [];
+    foreach ($done as $r) {
+        $p = __DIR__ . '/htr_dataset/images/' . basename((string) $r['processed_filename']);
+        if (!is_file($p)) continue;
+        $files['annotated/images/' . $r['processed_filename']] = (string) file_get_contents($p);
+        $rows[] = [$r['processed_filename'], $r['transcription'], 'labeled', $r['uid'] ?? ''];
+    }
+    if (!$rows) out(['ok' => false, 'error' => 'The image files are missing.'], 400);
+    $fh = fopen('php://temp', 'r+');
+    fputcsv($fh, ['image', 'text', 'status', 'uid'], ',', '"', '');
+    foreach ($rows as $row) fputcsv($fh, $row, ',', '"', '');
+    rewind($fh);
+    $files['annotated/labels.csv'] = "\xEF\xBB\xBF" . stream_get_contents($fh);
+    fclose($fh);
+    $tmpX = tempnam(sys_get_temp_dir(), 'ann');
+    writeXlsx($tmpX, 'Annotated', ['image', 'text', 'status', 'uid'], $rows);
+    $files['annotated/labels.xlsx'] = (string) file_get_contents($tmpX);
+    @unlink($tmpX);
+    $files['annotated/README.txt'] = "images/ holds the annotated pictures, labels.csv / labels.xlsx hold their text (the 'uid' column identifies each picture).\r\n" .
+        "To add them to another dataset: 'Upload images to annotate' with the images, then 'Import annotated file' with labels.csv or labels.xlsx.\r\n";
+    $dir = __DIR__ . '/htr_dataset/exports/';
+    if (!is_dir($dir)) mkdir($dir, 0777, true);
+    $zip = $dir . 'annotated.zip';
+    if (!createMinimalZip($zip, $files)) out(['ok' => false, 'error' => 'Could not write the zip file.'], 500);
+    out(['ok' => true, 'count' => count($rows), 'file' => 'htr_dataset/exports/annotated.zip', 'size' => filesize($zip)]);
 }
 
 if ($action === 'build_zip') {
