@@ -10,6 +10,9 @@ $pythonCandidates = [
     __DIR__ . '/.venv/Scripts/python.exe',
 ];
 $krakenPy = 'python';
+if (($envPy = getenv('KRAKEN_PYTHON')) && file_exists($envPy)) {
+    $pythonCandidates = [$envPy]; // set by the desktop app (bundled Python)
+}
 foreach ($pythonCandidates as $candidate) {
     if (file_exists($candidate)) {
         $krakenPy = $candidate;

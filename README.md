@@ -126,3 +126,9 @@ cropper/
 ## 📄 License
 
 MIT License. Free for personal and commercial use.
+
+
+cd desktop
+npm run prepare-runtime      # full: bundles Python + torch, several GB
+npm run dist                 # builds dist\Cropper Suite Setup 1.0.0.exe
+npm start                    # run it without building an installer
